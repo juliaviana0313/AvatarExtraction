@@ -122,3 +122,52 @@ export async function pollBrightLookup(token: unknown, key: string, fetcher: typ
   if (progress.status !== 'ready') throw new AvatarLookupError('PROVIDER_JOB_FAILED','The profile lookup could not finish. Please try again later.');
   return parseBrightProfile(await brightRequest(`/snapshot/${job.snapshot}?format=json`,key,undefined,fetcher),job.profileUrl);
 }
+
+// Cache only the minimal public photo result, never the full provider record.
+export type AvatarResult = {name:string;avatarUrl:string;profileUrl:string};
+type CachedLookup = {data:AvatarResult | {status:string;job:unknown};expires:number;checked:number};
+export interface AvatarCache { get(key:string):Promise<CachedLookup|undefined>; put(key:string,value:CachedLookup):Promise<void>; delete(key:string):Promise<void> }
+const memory = new Map<string,CachedLookup>();
+const inFlight = new Map<string,Promise<CachedLookup['data']>>();
+export function edgeAvatarCache(origin:string): AvatarCache {
+  const edge = typeof caches !== 'undefined' ? (caches as CacheStorage & {default?:Cache}).default : undefined;
+  const request = (key:string)=>new Request(`${origin}/__avatar_cache/v1/${key}`);
+  return {
+    async get(key) {
+      let entry=memory.get(key);
+      if (!entry && edge) {try {const response=await edge.match(request(key)); if(response) entry=await response.json() as CachedLookup;} catch { /* Cache availability must not block extraction. */ }}
+      if (!entry || entry.expires<=Date.now()) {memory.delete(key);return undefined;}
+      return entry;
+    },
+    async put(key,entry) {
+      if(memory.size>=200) memory.delete(memory.keys().next().value!);
+      memory.set(key,entry);
+      if(edge) try {await edge.put(request(key),Response.json(entry,{headers:{'Cache-Control':`public, max-age=${Math.max(1,Math.floor((entry.expires-Date.now())/1000))}`}}));} catch { /* Bounded memory cache remains usable. */ }
+    },
+    async delete(key) {memory.delete(key);if(edge) try {await edge.delete(request(key));} catch {}}
+  };
+}
+export async function fastAvatarLookup(body:{url?:unknown;job?:unknown},key:string,cache:AvatarCache,fetcher:typeof fetch=fetch,now=Date.now()) {
+  const profileUrl=body.job ? (await verifyLookup(body.job,key)).profileUrl : normalizeProfile(body.url);
+  // Scope cache entries to this provider credential without storing it in a URL.
+  const digest=await crypto.subtle.digest('SHA-256',encoder.encode(key+'\n'+profileUrl));
+  const id=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
+  const cached=await cache.get(id);
+  if(cached && cached.expires>now && ('avatarUrl' in cached.data || !body.job || now-cached.checked<900)) return cached.data;
+  const lock=id+(body.job?':poll':':start');
+  const existing=inFlight.get(lock);if(existing) return existing;
+  const work=(async()=>{
+    try {
+      const data=body.job ? await pollBrightLookup(body.job,key,fetcher) : await beginBrightLookup(profileUrl,key,fetcher);
+      let ttl='avatarUrl' in data ? 3600000 : 600000;
+      if('avatarUrl' in data) {
+        const signedExpiry=Number(new URL(data.avatarUrl).searchParams.get('e'))*1000;
+        if(signedExpiry>0) ttl=Math.max(0,Math.min(ttl,signedExpiry-Date.now()-60000));
+      }
+      if(ttl>0) await cache.put(id,{data,expires:Date.now()+ttl,checked:Date.now()});
+      return data;
+    } catch(error) {await cache.delete(id);throw error;}
+  })();
+  inFlight.set(lock,work);
+  try {return await work;} finally {inFlight.delete(lock);}
+}

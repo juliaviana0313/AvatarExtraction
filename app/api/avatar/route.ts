@@ -1,4 +1,4 @@
-import { AvatarLookupError, beginBrightLookup, pollBrightLookup } from '../../../lib/avatar';
+import { AvatarLookupError, fastAvatarLookup, edgeAvatarCache } from '../../../lib/avatar';
 export async function POST(request: Request) {
   const headers = {'Cache-Control':'no-store'};
   if (Number(request.headers.get('content-length') || 0) > 8192) return Response.json({error:'Request is too large.'},{status:413,headers});
@@ -11,7 +11,7 @@ export async function POST(request: Request) {
   } catch { return Response.json({error:'Invalid request.'},{status:400,headers}); }
   try {
     const key = process.env.BRIGHTDATA_API_KEY || '';
-    const data = body.job ? await pollBrightLookup(body.job,key) : await beginBrightLookup(body.url,key);
+    const data = await fastAvatarLookup(body,key,edgeAvatarCache(new URL(request.url).origin));
     return Response.json(data,{status:'status' in data && data.status === 'pending' ? 202 : 200,headers});
   } catch (error) {
     if (error instanceof AvatarLookupError) {

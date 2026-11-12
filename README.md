@@ -32,3 +32,7 @@ Provider coverage and public photo availability vary. Default placeholder avatar
 `lib/avatar.ts` retains the legacy direct-page extraction helper for regression tests; the production API uses Bright Data exclusively.
 
 Source: `app/page.tsx` (dashboard), `app/globals.css` (responsive styles), `app/api/avatar/route.ts` (endpoint), `lib/avatar.ts` (validation, provider requests, and signed jobs).
+
+## Lookup performance
+
+Successful results are cached for up to one hour (or less if the image link expires sooner) in a bounded worker memory cache and Cloudflare edge cache. In-progress lookups are reused for ten minutes, avoiding a new Bright Data job on repeated submissions. Concurrent requests in the same worker share work. Edge cache is regional and may be evicted; it is not durable global storage. Failures are not cached. First-time requests still depend on Bright Data processing time. The browser polls every second for the first minute, then every three seconds.

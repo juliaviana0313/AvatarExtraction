@@ -42,3 +42,26 @@ await assert.rejects(brightRequest('/test',sampleKey,undefined,async()=>new Resp
 assert.throws(()=>parseBrightProfile([{avatar:photo,default_avatar:true}],'https://www.linkedin.com/in/test/'),e=>e.code==='PHOTO_NOT_AVAILABLE');
 assert.throws(()=>parseBrightProfile([{avatar:photo,input_url:'https://www.linkedin.com/in/someone-else/'}],'https://www.linkedin.com/in/test/'),e=>e.code==='PROFILE_MISMATCH');
 console.log('PASS: Bright Data trigger, signed polling, complete result, inactive account, credentials, credits, and wrong/default photos.');
+const {fastAvatarLookup}=await import('../lib/avatar.ts');
+const entries=new Map();
+const cache={get:async k=>entries.get(k),put:async(k,v)=>{entries.set(k,v)},delete:async k=>{entries.delete(k)}};
+let providerCalls=0;
+const provider=async url=>{providerCalls++;return String(url).includes('/trigger?')?Response.json({snapshot_id:'sd_cache123'}):String(url).includes('/progress/')?Response.json({status:'ready'}):Response.json([{name:'Test Person',avatar:photo,input_url:'https://www.linkedin.com/in/test/'}]);};
+// Use a non-expiring sample image for cache tests.
+const cachePhoto=photo.replace('e=1&','e=2147483647&');
+const cachedProvider=async(url,options)=>{const r=await provider(url,options);if(String(url).includes('/snapshot/'))return Response.json([{name:'Test Person',avatar:cachePhoto,input_url:'https://www.linkedin.com/in/test/'}]);return r;};
+const initial=await fastAvatarLookup({url:'linkedin.com/in/test'},sampleKey,cache,cachedProvider);
+const repeated=await fastAvatarLookup({url:'https://www.linkedin.com/in/test/?trk=foo'},sampleKey,cache,cachedProvider);
+assert.equal(providerCalls,1);assert.equal(repeated.job,initial.job);
+const completed=await fastAvatarLookup({job:initial.job},sampleKey,cache,cachedProvider,Date.now()+1000);
+assert.equal(completed.avatarUrl,cachePhoto);assert.equal(providerCalls,3);
+const beforeWarm=providerCalls;
+assert.equal((await fastAvatarLookup({url:'linkedin.com/in/test'},sampleKey,cache,cachedProvider)).avatarUrl,cachePhoto);
+assert.equal(providerCalls,beforeWarm,'Warm lookup must not call Bright Data');
+for(const entry of entries.values())entry.expires=1;
+await fastAvatarLookup({url:'linkedin.com/in/test'},sampleKey,cache,cachedProvider);
+assert.equal(providerCalls,beforeWarm+1,'Expired cache must refresh');
+entries.clear();const beforeConcurrent=providerCalls;
+await Promise.all([fastAvatarLookup({url:'linkedin.com/in/test'},sampleKey,cache,cachedProvider),fastAvatarLookup({url:'linkedin.com/in/test'},sampleKey,cache,cachedProvider)]);
+assert.equal(providerCalls,beforeConcurrent+1,'Concurrent starts must share one provider job');
+console.log('PASS: pending job reuse, instant warm lookup without provider calls, expiry, and concurrent deduplication.');
