@@ -107,3 +107,42 @@ test('all 300 Identity Resolver jobs finish without dropping results',async()=>{
  const result=await f.call('/api/jobs',{urls,provider:'identity-resolver'});await f.settle();
  const statuses=await f.call('/api/jobs/status',{ids:result.data.jobs.map(j=>j.id)});await f.settle();assert.equal(statuses.data.jobs.length,300);assert.ok(statuses.data.jobs.every(j=>j.status==='successful'));assert.equal(calls,300);assert.ok(peak<=3);
 });
+
+test('Apify async submission, signed callback, selected fields, cache and provider isolation',async()=>{
+ const f=fixture();f.env.APIFY_API_KEY='apify-test';delete f.env.BRIGHTDATA_API_KEY;
+ const url='https://www.linkedin.com/in/apify-example/';let submissions=0,webhook;
+ globalThis.fetch=async(u,options)=>{
+  const target=new URL(u);assert.equal(target.hostname,'api.apify.com');assert.equal(options.headers.Authorization,'Bearer apify-test');
+  if(target.pathname.endsWith('/runs')){submissions++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{profileUrls:[url],maxProfiles:1});webhook=JSON.parse(Buffer.from(target.searchParams.get('webhooks'),'base64').toString())[0];return Response.json({data:{id:'testRun123'}});}
+  if(target.pathname==='/v2/actor-runs/testRun123')return Response.json({data:{id:'testRun123',status:'SUCCEEDED',defaultDatasetId:'testData123'}});
+  assert.equal(target.pathname,'/v2/datasets/testData123/items');assert.match(target.searchParams.get('fields'),/avatar/);return Response.json([{name:'Example',inputUrl:url,avatar:photo}]);
+ };
+ const created=await f.call('/api/jobs',{urls:[url],provider:'apify'});await f.settle();assert.equal(created.data.jobs[0].provider,'apify');assert.equal(submissions,1);
+ const path=new URL(webhook.requestUrl).pathname;const auth=JSON.parse(webhook.headersTemplate);
+ assert.equal((await f.call(path,{resource:{id:'testRun123'}})).status,401);
+ assert.equal((await f.call(path,{resource:{id:'other'}},auth)).status,400);
+ assert.equal((await f.call(path,{resource:{id:'testRun123'}},auth)).status,200);await f.settle();
+ const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'successful');assert.equal(done.provider,'apify');assert.equal(done.result.avatarUrl,photo);
+ const cached=await f.call('/api/jobs',{urls:[url],provider:'apify'});await f.settle();assert.equal(cached.data.jobs[0].cacheHit,true);assert.equal(submissions,1);
+ assert.equal((await f.call(path,{resource:{id:'testRun123'}},auth)).status,200);await f.settle();
+ const other=await f.call('/api/jobs',{urls:[url],provider:'brightdata'});await f.settle();assert.equal(other.data.jobs[0].cacheHit,false);
+});
+test('Apify progress polling completes without webhook; failed runs and missing photos are clear',async()=>{
+ for(const scenario of ['SUCCEEDED','FAILED','TIMED-OUT','ABORTED','no-photo','wrong-profile']){
+  const f=fixture();f.env.APIFY_API_KEY='apify-test';
+  globalThis.fetch=async u=>{
+   const path=new URL(u).pathname;
+   if(path.endsWith('/runs'))return Response.json({data:{id:'testRun'}});
+   if(path.includes('/actor-runs/'))return Response.json({data:{id:'testRun',status:['no-photo','wrong-profile'].includes(scenario)?'SUCCEEDED':scenario,defaultDatasetId:'testDataset'}});
+   return Response.json([{inputUrl:'https://www.linkedin.com/in/'+(scenario==='wrong-profile'?'other':'example')+'/',avatar:scenario==='no-photo'?null:photo}]);
+  };
+  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apify'});await f.settle();f.sql.prepare('UPDATE avatar_jobs SET next_check=0').run();await f.call('/api/jobs/'+created.data.jobs[0].id);await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,scenario==='SUCCEEDED'?'successful':'failed');if(done.error)assert.match(done.error,/Apify/);
+ }
+});
+test('Apify credentials and submission failures never fall back to another provider',async()=>{
+ for(const status of [401,402,'timeout']){
+  const f=fixture();f.env.APIFY_API_KEY='apify-test';let calls=0;
+  globalThis.fetch=async u=>{calls++;assert.equal(new URL(u).hostname,'api.apify.com');if(status==='timeout')throw Error('timeout');return new Response('',{status});};
+  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apify'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/Apify/);assert.equal(calls,1);
+ }
+});

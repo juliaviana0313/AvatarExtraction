@@ -19,7 +19,7 @@ The job tests use in-memory SQLite and mocked provider/image responses; they do 
 
 ## Request flow
 
-`POST /api/jobs` accepts `{urls: string[], storeImages?: boolean, provider?: "brightdata" | "identity-resolver"}`. Omitted provider defaults to Bright Data. The selector routes only to the chosen provider; cache keys, active jobs, and history retain that choice. Retry uses the failed entry’s original provider. Existing jobs migrate to Bright Data. Every normalized URL checks the shared D1 cache first (24-hour TTL, shortened by external image expiry). Cache hits return immediately without provider requests. Cache misses are persisted before returning HTTP 202. Duplicate active requests with the same storage preference reuse the same job.
+`POST /api/jobs` accepts `{urls: string[], storeImages?: boolean, provider?: "brightdata" | "identity-resolver" | "apify"}`. Omitted provider defaults to Bright Data. The selector routes only to the chosen provider; cache keys, active jobs, and history retain that choice. Retry uses the failed entry’s original provider. Existing jobs migrate to Bright Data. Every normalized URL checks the shared D1 cache first (24-hour TTL, shortened by external image expiry). Cache hits return immediately without provider requests. Cache misses are persisted before returning HTTP 202. Duplicate active requests with the same storage preference reuse the same job.
 
 Atomic database claims enforce a global maximum of three active jobs across Worker instances. Submission runs through `waitUntil`. Bright Data receives a per-job authenticated callback URL; its completion callback persists the result and starts the next queued work without requiring an open browser. `GET /api/jobs/:id` returns durable status and also runs recovery checks. The browser polls local job status every 2.5 seconds, with an 8-second reconnect delay after network errors. IDs are random read capabilities; there is no public job-list endpoint.
 
@@ -50,3 +50,13 @@ The Identity Resolver option sends a server-side GET to `https://ai.mihajlo.mk/a
 The GET runs inside the same bounded background queue, with retries for transient errors and an eight-second total request budget. Unlike Bright Data, it returns the result directly and needs no callback. Its internal scrape duration is not exposed: submission timing includes server response wait, retrieval timing covers reading/parsing the response, and scraping timing stays null. Provider switching never silently falls back or uses the other provider’s cached result.
 
 Batches accept up to 300 URLs. The browser validates the whole batch, submits groups of 20 with at most three requests in flight, and retains any unsubmitted URLs for retry. Provider concurrency remains three globally. `/api/jobs/status` reads up to 300 random job IDs in grouped queries, so polling does not issue a separate HTTP request for every queued profile. History retains all pending jobs and up to 600 completed entries.
+
+## Apify
+
+Select **Apify** to run `true-data~linkedin-profile-scraper`. Set `APIFY_API_KEY` in the ignored local `.env` and as a secret in Sites runtime. The token is sent only to `api.apify.com` using the Authorization header.
+
+The integration uses the same actor and `profileUrls` input as the synchronous example, but starts asynchronous `/v2/acts/true-data~linkedin-profile-scraper/runs` jobs to avoid blocking HTTP requests. Each uncached profile starts one run, with at most three active lookups globally; actor per-run charges therefore apply separately. Authenticated completion webhooks and polling retrieve the finished dataset. Dataset downloads select only name, input/profile URL, avatar, default-avatar and error fields. Other actor output remains on Apify and is not retained by the dashboard. Scraping timing includes actor startup and notification delay.
+
+Apify cache keys include provider, actor and API-key scope. History and Retry preserve Apify selection after refresh. Missing photos, mismatched profiles, invalid credentials, depleted credits, failed/aborted/timed-out runs, and malformed responses have clear errors. POST timeouts are not automatically retried because a run may already have been created. The 300-profile input limit and optional permitted image storage also apply to Apify.
+
+References: [actor](https://apify.com/true-data/linkedin-profile-scraper), [asynchronous runs](https://docs.apify.com/api/v2/actors-runs-post), [webhooks](https://docs.apify.com/integrations/webhooks/ad-hoc-webhooks).

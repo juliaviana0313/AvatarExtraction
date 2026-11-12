@@ -1,7 +1,8 @@
+import {APIFY_ACTOR,apifyId,apifyRequest,parseApifyProfile} from './apify';
 import {type LookupProvider,parseIdentityProfile,resolveIdentity,isResolverPhoto} from './identity-resolver';
 import {normalizeProfile,parseBrightProfile,isAvatar} from './avatar';
 import {MAX_ACTIVE,MAX_BATCH,JOB_TIMEOUT,OUTPUT_FIELDS,isTerminal,retryableStatus,backoff,imageType,boundedMap} from './job-policy';
-interface Env {DB?:D1Database;BUCKET?:R2Bucket;BRIGHTDATA_API_KEY?:string}
+interface Env {DB?:D1Database;BUCKET?:R2Bucket;BRIGHTDATA_API_KEY?:string;APIFY_API_KEY?:string}
 type Ctx={waitUntil(promise:Promise<unknown>):void};
 type Row={provider:LookupProvider;id:string;cache_key:string;active_key:string|null;profile_url:string;origin:string;status:string;storage_allowed:number;snapshot:string|null;result:string|null;error:string|null;created_at:number;submitted_at:number|null;ready_at:number|null;completed_at:number|null;next_check:number;lease_until:number;attempts:number;submission_ms:number|null;scraping_ms:number|null;retrieval_ms:number|null;storage_ms:number|null;image_load_ms:number|null;cache_hit:number};
 const base='https://api.brightdata.com/datasets/v3';
@@ -9,10 +10,11 @@ const dataset='gd_l1viktl72bvl7bjuj0';
 const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const db=(env:Env)=>{if(!env.DB)throw new Error('Job database unavailable.');return env.DB;};
 const key=(env:Env)=>env.BRIGHTDATA_API_KEY||process.env.BRIGHTDATA_API_KEY||'';
+const apifyKey=(env:Env)=>env.APIFY_API_KEY||process.env.APIFY_API_KEY||'';
 const enc=new TextEncoder();
 const hex=(data:ArrayBuffer)=>Array.from(new Uint8Array(data),b=>b.toString(16).padStart(2,'0')).join('');
-async function cacheKey(url:string,env:Env,selected:LookupProvider){return hex(await crypto.subtle.digest('SHA-256',enc.encode((selected==='brightdata'?key(env):'identity-resolver:v1')+'\n'+url)));}
-async function callbackKey(id:string,env:Env){const k=await crypto.subtle.importKey('raw',enc.encode(key(env)),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',k,enc.encode('avatar-callback:'+id)));}
+async function cacheKey(url:string,env:Env,selected:LookupProvider){return hex(await crypto.subtle.digest('SHA-256',enc.encode((selected==='brightdata'?key(env):selected==='apify'?'apify:'+APIFY_ACTOR+':'+apifyKey(env):'identity-resolver:v1')+'\n'+url)));}
+async function callbackKey(id:string,env:Env,selected:LookupProvider='brightdata'){const k=await crypto.subtle.importKey('raw',enc.encode(selected==='apify'?apifyKey(env):key(env)),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',k,enc.encode('avatar-callback:'+id)));}
 async function row(id:string,env:Env){return db(env).prepare('SELECT * FROM avatar_jobs WHERE id=?').bind(id).first<Row>();}
 function view(r:Row){return {id:r.id,provider:r.provider,profileUrl:r.profile_url,status:isTerminal(r.status)?r.status:'pending',phase:r.status,error:r.error,result:r.result?JSON.parse(r.result):null,cacheHit:!!r.cache_hit,timings:{queueMs:r.submitted_at?r.submitted_at-r.created_at:null,submissionMs:r.submission_ms,scrapingMs:r.scraping_ms,retrievalMs:r.retrieval_ms,storageMs:r.storage_ms,imageLoadMs:r.image_load_ms,totalMs:r.completed_at?r.completed_at-r.created_at:null}};}
 async function fail(id:string,message:string,env:Env){await db(env).prepare("UPDATE avatar_jobs SET status='failed',error=?,completed_at=?,active_key=NULL,lease_until=0 WHERE id=? AND status NOT IN ('successful','failed')").bind(message,Date.now(),id).run();console.warn(JSON.stringify({event:'avatar_job_failed',id,error:message}));}
@@ -57,7 +59,7 @@ async function storePhoto(r:Row,source:string,env:Env):Promise<string>{
 }
 async function finish(r:Row,data:unknown,env:Env,retrievalStarted:number){
   try{
-    const photo=r.cache_hit&&r.result?JSON.parse(r.result):r.provider==='identity-resolver'?parseIdentityProfile(data,r.profile_url):parseBrightProfile(data,r.profile_url);
+    const photo=r.cache_hit&&r.result?JSON.parse(r.result):r.provider==='identity-resolver'?parseIdentityProfile(data,r.profile_url):r.provider==='apify'?parseApifyProfile(data,r.profile_url):parseBrightProfile(data,r.profile_url);
     const retrievalMs=Date.now()-retrievalStarted;
     photo.avatarUrl=await storePhoto(r,photo.avatarUrl,env);
     let expires=Date.now()+86400000;
@@ -71,19 +73,28 @@ async function finish(r:Row,data:unknown,env:Env,retrievalStarted:number){
     console.log(JSON.stringify({event:'avatar_job_complete',id:r.id,submissionMs:r.submission_ms,scrapingMs:r.scraping_ms,retrievalMs,totalMs:completed-r.created_at}));
   }catch(error){await fail(r.id,error instanceof Error?error.message:'Unable to retrieve the photo.',env);}
 }
-async function retrieve(r:Row,env:Env,data?:unknown){
+async function retrieve(r:Row,env:Env,data?:unknown,apifyDataset?:string){
   const claimed=await db(env).prepare("UPDATE avatar_jobs SET status='retrieving',lease_until=? WHERE id=? AND status IN ('running','submitting','retrieving') AND lease_until<? RETURNING *").bind(Date.now()+25000,r.id,Date.now()).first<Row>();
   if(!claimed)throw new Error('Retrieval is already in progress; retry callback.');
   const start=Date.now();
   const scrape=Math.max(0,start-(r.submitted_at||r.created_at));
   await db(env).prepare('UPDATE avatar_jobs SET ready_at=?,scraping_ms=? WHERE id=?').bind(start,scrape,r.id).run();claimed.scraping_ms=scrape;
-  try{await finish(claimed,data??await provider(`/snapshot/${r.snapshot}?format=json`,env),env,start);}catch(error){
+  try{await finish(claimed,data??(r.provider==='apify'?await apifyRequest(`/datasets/${apifyDataset}/items?format=json&fields=name,inputUrl,url,avatar,default_avatar,error,error_code&limit=2`,apifyKey(env)):await provider(`/snapshot/${r.snapshot}?format=json`,env)),env,start);}catch(error){
     await db(env).prepare("UPDATE avatar_jobs SET status='running',lease_until=0,next_check=? WHERE id=? AND status='retrieving'").bind(Date.now()+5000,r.id).run();throw error;
   }
 }
+async function checkApify(r:Row,env:Env){
+  if(!apifyId(r.snapshot))throw new Error('Apify run is not yet recorded; retry callback.');
+  const response=await apifyRequest(`/actor-runs/${r.snapshot}`,apifyKey(env));const run=response?.data;
+  if(!run||run.id!==r.snapshot)throw new Error('Apify returned an invalid run.');
+  if(run.status==='SUCCEEDED'){
+    if(!apifyId(run.defaultDatasetId))throw new Error('Apify returned an invalid dataset.');
+    await retrieve(r,env,undefined,run.defaultDatasetId);
+  }else if(['FAILED','TIMED-OUT','ABORTED'].includes(run.status))await fail(r.id,`Apify lookup ${run.status.toLowerCase()}. Please retry.`,env);
+}
 async function check(r:Row,env:Env){
   const claim=await db(env).prepare("UPDATE avatar_jobs SET next_check=? WHERE id=? AND status='running' AND next_check<=? RETURNING id").bind(Date.now()+5000,r.id,Date.now()).first();if(!claim||!r.snapshot)return;
-  try{const progress=await provider(`/progress/${r.snapshot}`,env) as {status:string};if(progress.status==='ready')await retrieve(r,env);else if(['failed','canceled'].includes(progress.status))await fail(r.id,'The provider could not retrieve this profile. Retry later.',env);}catch{console.warn(JSON.stringify({event:'avatar_progress_retry',id:r.id}));}
+  try{if(r.provider==='apify'){await checkApify(r,env);return;}const progress=await provider(`/progress/${r.snapshot}`,env) as {status:string};if(progress.status==='ready')await retrieve(r,env);else if(['failed','canceled'].includes(progress.status))await fail(r.id,'The provider could not retrieve this profile. Retry later.',env);}catch{console.warn(JSON.stringify({event:'avatar_progress_retry',id:r.id}));}
 }
 async function submit(r:Row,env:Env){
   const started=Date.now();
@@ -98,6 +109,14 @@ async function submit(r:Row,env:Env){
       await db(env).prepare('UPDATE avatar_jobs SET submitted_at=?,submission_ms=? WHERE id=?').bind(started,resolved.submissionMs,r.id).run();
       r.submission_ms=resolved.submissionMs;
       await finish(r,resolved.data,env,resolved.retrievalStarted);
+      return;
+    }
+    if(r.provider==='apify'){
+      const webhook=[{eventTypes:['ACTOR.RUN.SUCCEEDED','ACTOR.RUN.FAILED','ACTOR.RUN.TIMED_OUT','ACTOR.RUN.ABORTED'],requestUrl:`${r.origin}/api/jobs/${r.id}/callback`,headersTemplate:JSON.stringify({Authorization:`Bearer ${await callbackKey(r.id,env,'apify')}`})}];
+      const params=new URLSearchParams({timeout:'1200',webhooks:btoa(JSON.stringify(webhook))});
+      const response=await apifyRequest(`/acts/${APIFY_ACTOR}/runs?${params}`,apifyKey(env),{profileUrls:[r.profile_url],maxProfiles:1});
+      if(!apifyId(response?.data?.id))throw new Error('Apify returned an invalid run.');
+      await db(env).prepare("UPDATE avatar_jobs SET status='running',snapshot=?,submission_ms=?,next_check=? WHERE id=? AND status='submitting'").bind(response.data.id,Date.now()-started,Date.now()+3000,r.id).run();
       return;
     }
     const params=new URLSearchParams({dataset_id:dataset,format:'json',include_errors:'true',custom_output_fields:OUTPUT_FIELDS,notify:'true',endpoint:`${r.origin}/api/jobs/${r.id}/callback`,auth_header:`Bearer ${await callbackKey(r.id,env)}`,uncompressed_webhook:'true'});
@@ -162,17 +181,23 @@ export async function handleAvatarJobs(request:Request,env:Env,ctx:Ctx):Promise<
     if(path==='/api/jobs'&&request.method==='POST'){
       const input=await body(request);const urls=input.urls??[input.url];if(!Array.isArray(urls)||!urls.length||urls.length>MAX_BATCH)return json({error:'Enter 1–300 LinkedIn profile URLs.'},400);
       const selected=input.provider??'brightdata';
-      if(!['brightdata','identity-resolver'].includes(selected))return json({error:'Choose Bright Data or Identity Resolver.'},400);
+      if(!['brightdata','identity-resolver','apify'].includes(selected))return json({error:'Choose Bright Data, Identity Resolver, or Apify.'},400);
       const normalized=[...new Set(urls.map(normalizeProfile))];
       const items=await boundedMap(normalized,3,u=>create(u,input.storeImages===true,url.origin,env,selected));kick(ctx,env);return json({jobs:items},items.some(j=>j.status==='pending')?202:200);
     }
     const match=path.match(/^\/api\/jobs\/([a-f0-9]{32})(?:\/(callback|metrics))?$/);if(!match)return json({error:'Not found.'},404);
     const r=await row(match[1],env);if(!r)return json({error:'Job not found.'},404);
     if(match[2]==='callback'&&request.method==='POST'){
-      if(r.provider!=='brightdata')return json({error:'Not found.'},404);
-      if(request.headers.get('authorization')!==`Bearer ${await callbackKey(r.id,env)}`)return json({error:'Unauthorized.'},401);
+      if(r.provider==='identity-resolver')return json({error:'Not found.'},404);
+      if(request.headers.get('authorization')!==`Bearer ${await callbackKey(r.id,env,r.provider)}`)return json({error:'Unauthorized.'},401);
       if(isTerminal(r.status))return json({ok:true});
-      const payload=await body(request);if(payload.snapshot_id&&r.snapshot&&payload.snapshot_id!==r.snapshot)return json({error:'Snapshot mismatch.'},400);
+      const payload=await body(request);
+      if(r.provider==='apify'){
+        if(!r.snapshot)return json({error:'Submission is not yet recorded; retry callback.'},503);
+        if(payload.resource?.id!==r.snapshot)return json({error:'Run mismatch.'},400);
+        await checkApify(r,env);kick(ctx,env);return json({ok:true});
+      }
+      if(payload.snapshot_id&&r.snapshot&&payload.snapshot_id!==r.snapshot)return json({error:'Snapshot mismatch.'},400);
       if(Array.isArray(payload))await retrieve(r,env,payload);
       else if(payload.status==='failed')await fail(r.id,'The provider could not retrieve this profile.',env);
       else if(r.snapshot)await retrieve(r,env);
