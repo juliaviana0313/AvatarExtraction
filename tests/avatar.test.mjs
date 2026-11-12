@@ -20,3 +20,25 @@ await assert.rejects(extractAvatar('linkedin.com/in/test', async()=>new Response
 await assert.rejects(extractAvatar('linkedin.com/in/test', async()=>new Response('',{status:404})), e=>e.code==='PROFILE_NOT_FOUND');
 await assert.rejects(extractAvatar('linkedin.com/in/test', async()=>new Response('',{status:500})), e=>e.code==='LINKEDIN_UPSTREAM_ERROR');
 console.log('PASS: HTTP 999, login wall, missing profile, and upstream outage are classified separately.');
+const {beginBrightLookup,pollBrightLookup,parseBrightProfile,brightRequest,signLookup,verifyLookup} = await import('../lib/avatar.ts');
+const sampleKey='test-key-not-a-real-credential';
+let starts=0;
+const begin=await beginBrightLookup('linkedin.com/in/test',sampleKey,async(url,options)=>{
+  starts++; assert.ok(String(url).startsWith('https://api.brightdata.com/datasets/v3/trigger?'));
+  assert.equal(options.headers.Authorization,`Bearer ${sampleKey}`);
+  assert.deepEqual(JSON.parse(options.body),{input:[{url:'https://www.linkedin.com/in/test/'}]});
+  return Response.json({snapshot_id:'sd_test123'});
+});
+assert.equal(starts,1);assert.equal(begin.status,'pending');assert.ok(!begin.job.includes(sampleKey));
+let polls=0;
+const ready=await pollBrightLookup(begin.job,sampleKey,async url=>{polls++;return String(url).includes('/progress/')?Response.json({status:'ready',dataset_id:'gd_l1viktl72bvl7bjuj0'}):Response.json([{name:'Test Person',avatar:photo,input_url:'https://www.linkedin.com/in/test/',default_avatar:false}]);});
+assert.equal(polls,2);assert.equal(ready.avatarUrl,photo);
+assert.equal((await pollBrightLookup(begin.job,sampleKey,async()=>Response.json({status:'running'}))).status,'pending');
+await assert.rejects(verifyLookup(begin.job+'x',sampleKey),e=>e.code==='LOOKUP_EXPIRED');
+await assert.rejects(verifyLookup(await signLookup({snapshot:'sd_test123',profileUrl:'https://www.linkedin.com/in/test/',expires:1},sampleKey),sampleKey),e=>e.code==='LOOKUP_EXPIRED');
+await assert.rejects(brightRequest('/test',sampleKey,undefined,async()=>new Response('Customer is not active',{status:403})),e=>e.code==='PROVIDER_ACCOUNT_INACTIVE');
+await assert.rejects(brightRequest('/test',sampleKey,undefined,async()=>new Response('Invalid token',{status:401})),e=>e.code==='PROVIDER_AUTH_FAILED');
+await assert.rejects(brightRequest('/test',sampleKey,undefined,async()=>new Response('Balance depleted',{status:402})),e=>e.code==='PROVIDER_CREDITS_REQUIRED');
+assert.throws(()=>parseBrightProfile([{avatar:photo,default_avatar:true}],'https://www.linkedin.com/in/test/'),e=>e.code==='PHOTO_NOT_AVAILABLE');
+assert.throws(()=>parseBrightProfile([{avatar:photo,input_url:'https://www.linkedin.com/in/someone-else/'}],'https://www.linkedin.com/in/test/'),e=>e.code==='PROFILE_MISMATCH');
+console.log('PASS: Bright Data trigger, signed polling, complete result, inactive account, credentials, credits, and wrong/default photos.');

@@ -61,3 +61,64 @@ export async function extractAvatar(value: unknown, fetcher: typeof fetch = fetc
   if (!result) throw new AvatarLookupError('PHOTO_NOT_AVAILABLE', 'LinkedIn did not return a usable profile photo. We cannot determine the photo’s visibility from this response.');
   return {...result, profileUrl};
 }
+
+const brightBase = 'https://api.brightdata.com/datasets/v3';
+const dataset = 'gd_l1viktl72bvl7bjuj0';
+export async function brightRequest(path: string, key: string, body?: unknown, fetcher: typeof fetch = fetch): Promise<unknown> {
+  if (!key.trim()) throw new AvatarLookupError('PROVIDER_NOT_CONFIGURED', 'The dashboard owner needs to configure the profile lookup service.');
+  const response = await fetcher(brightBase + path, {method: body === undefined ? 'GET' : 'POST', redirect:'error', signal:AbortSignal.timeout(25000), headers:{Authorization:`Bearer ${key}`, 'Content-Type':'application/json'}, ...(body === undefined ? {} : {body:JSON.stringify(body)})});
+  const raw = await response.text();
+  // Provider errors can be plain text. Never forward arbitrary upstream text or credentials.
+  if (/customer is not active|account is (?:inactive|suspended)|activate (?:your|the) account/i.test(raw)) throw new AvatarLookupError('PROVIDER_ACCOUNT_INACTIVE', 'The Bright Data account is not active. The dashboard owner must activate it in Bright Data before avatar lookup can work.', response.status);
+  if (/insufficient (?:balance|credit)|not enough (?:balance|credit)/i.test(raw) || response.status === 402) throw new AvatarLookupError('PROVIDER_CREDITS_REQUIRED', 'The profile lookup account needs credits. Please contact the dashboard owner.', response.status);
+  if ([401,403].includes(response.status)) throw new AvatarLookupError('PROVIDER_AUTH_FAILED', 'Bright Data rejected the API key or account permissions. Please contact the dashboard owner.', response.status);
+  if (response.status === 429) throw new AvatarLookupError('PROVIDER_RATE_LIMIT', 'The profile lookup service is busy. Please wait before trying again.', 429);
+  if (!response.ok) throw new AvatarLookupError('PROVIDER_ERROR', 'The profile lookup service could not complete this request. Please try again later.', response.status);
+  try { return JSON.parse(raw); } catch { throw new AvatarLookupError('PROVIDER_RESPONSE_INVALID', 'The profile lookup service returned an unreadable response.'); }
+}
+type LookupJob = {snapshot: string; profileUrl: string; expires: number};
+const encoder = new TextEncoder();
+async function signingKey(key: string) { return crypto.subtle.importKey('raw', encoder.encode(key), {name:'HMAC',hash:'SHA-256'}, false, ['sign','verify']); }
+function encode64(bytes: Uint8Array) { return btoa(Array.from(bytes,b=>String.fromCharCode(b)).join('')).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function decode64(value: string) { return Uint8Array.from(atob(value.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0)); }
+export async function signLookup(job: LookupJob, key: string) {
+  const payload = encode64(encoder.encode(JSON.stringify(job)));
+  const sig = await crypto.subtle.sign('HMAC',await signingKey(key),encoder.encode('avatar-job:'+payload));
+  return payload+'.'+encode64(new Uint8Array(sig));
+}
+export async function verifyLookup(token: unknown, key: string): Promise<LookupJob> {
+  try {
+    if (typeof token !== 'string' || token.length > 6000) throw new Error();
+    const parts = token.split('.'); if(parts.length !== 2) throw new Error();
+    const valid = await crypto.subtle.verify('HMAC',await signingKey(key),decode64(parts[1]),encoder.encode('avatar-job:'+parts[0]));
+    if (!valid) throw new Error();
+    const job = JSON.parse(new TextDecoder().decode(decode64(parts[0]))) as LookupJob;
+    if (!/^s[d]?_[a-zA-Z0-9]+$/.test(job.snapshot) || !Number.isFinite(job.expires) || job.expires < Date.now() || normalizeProfile(job.profileUrl) !== job.profileUrl) throw new Error();
+    return job;
+  } catch { throw new AvatarLookupError('LOOKUP_EXPIRED', 'This lookup has expired or is invalid. Please extract the avatar again.'); }
+}
+export function parseBrightProfile(data: unknown, profileUrl: string) {
+  if (!Array.isArray(data) || data.length !== 1 || !data[0] || typeof data[0] !== 'object') throw new AvatarLookupError('PROVIDER_RESPONSE_INVALID','The profile lookup service returned an unexpected result.');
+  const record = data[0] as Record<string, unknown>;
+  if (record.error || record.error_code) throw new AvatarLookupError('PROFILE_NOT_FOUND','Bright Data could not retrieve this profile. Check the URL or try again later.');
+  // Verify the input association; never use another person's recommended profile photo.
+  const input = record.input as {url?:unknown} | undefined;
+  const returnedUrl = record.input_url ?? input?.url ?? record.url;
+  if (returnedUrl && normalizeProfile(returnedUrl) !== profileUrl) throw new AvatarLookupError('PROFILE_MISMATCH','The lookup service returned a different profile. Please try again.');
+  if (record.default_avatar === true || typeof record.avatar !== 'string' || !isAvatar(record.avatar)) throw new AvatarLookupError('PHOTO_NOT_AVAILABLE','The profile lookup service found no public profile photo for this person.');
+  return {name:typeof record.name === 'string' && record.name.trim() ? record.name : 'LinkedIn profile', avatarUrl:record.avatar, profileUrl};
+}
+export async function beginBrightLookup(value: unknown, key: string, fetcher: typeof fetch = fetch) {
+  const profileUrl = normalizeProfile(value);
+  const data = await brightRequest(`/trigger?dataset_id=${dataset}&include_errors=true&format=json`,key,{input:[{url:profileUrl}]},fetcher) as {snapshot_id?:unknown};
+  if (typeof data?.snapshot_id !== 'string' || !/^s[d]?_[a-zA-Z0-9]+$/.test(data.snapshot_id)) throw new AvatarLookupError('PROVIDER_RESPONSE_INVALID','The lookup service did not start a valid request.');
+  return {status:'pending', job:await signLookup({snapshot:data.snapshot_id,profileUrl,expires:Date.now()+30*60*1000},key)};
+}
+export async function pollBrightLookup(token: unknown, key: string, fetcher: typeof fetch = fetch) {
+  const job = await verifyLookup(token,key);
+  const progress = await brightRequest(`/progress/${job.snapshot}`,key,undefined,fetcher) as {status?:string;dataset_id?:string};
+  if (progress.dataset_id && progress.dataset_id !== dataset) throw new AvatarLookupError('PROVIDER_RESPONSE_INVALID','Unexpected lookup dataset.');
+  if (['starting','running'].includes(progress.status || '')) return {status:'pending',job:token};
+  if (progress.status !== 'ready') throw new AvatarLookupError('PROVIDER_JOB_FAILED','The profile lookup could not finish. Please try again later.');
+  return parseBrightProfile(await brightRequest(`/snapshot/${job.snapshot}?format=json`,key,undefined,fetcher),job.profileUrl);
+}
