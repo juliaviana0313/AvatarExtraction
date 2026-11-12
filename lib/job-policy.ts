@@ -1,5 +1,5 @@
 export const MAX_ACTIVE=3;
-export const MAX_BATCH=20;
+export const MAX_BATCH=300;
 export const JOB_TIMEOUT=20*60*1000;
 export const OUTPUT_FIELDS='name|url|avatar';
 export const isTerminal=(status:string)=>status==='successful'||status==='failed';

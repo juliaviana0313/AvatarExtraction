@@ -43,7 +43,7 @@ test('cached external photo can be stored with permission without another provid
 test('transient submission retries; permanent errors and stale jobs fail clearly',async()=>{
  const f=fixture();let attempts=0;globalThis.fetch=async()=>++attempts===1?new Response('',{status:503}):Response.json({snapshot_id:'sd_retry'});
  const result=await f.call('/api/jobs',{urls:['https://linkedin.com/in/retry/']});await f.settle();assert.equal(attempts,2);
- f.sql.prepare('UPDATE avatar_jobs SET created_at=?').run(Date.now()-21*60*1000);await f.call('/api/jobs/'+result.data.jobs[0].id);await f.settle();assert.equal(f.sql.prepare('SELECT status FROM avatar_jobs').get().status,'failed');
+ f.sql.prepare('UPDATE avatar_jobs SET submitted_at=?').run(Date.now()-21*60*1000);await f.call('/api/jobs/'+result.data.jobs[0].id);await f.settle();assert.equal(f.sql.prepare('SELECT status FROM avatar_jobs').get().status,'failed');
  globalThis.fetch=async()=>new Response('',{status:402});const next=await f.call('/api/jobs',{urls:['https://linkedin.com/in/no-credits/']});await f.settle();const failed=(await f.call('/api/jobs/'+next.data.jobs[0].id)).data;await f.settle();assert.equal(failed.status,'failed');assert.match(failed.error,/credits/);
 });
 test('invalid input rejected before provider; ambiguous POST timeout not retried',async()=>{
@@ -86,4 +86,24 @@ test('Identity Resolver retries transient errors without falling back to Bright 
  const f=fixture();let calls=0;
  globalThis.fetch=async u=>{assert.equal(new URL(u).hostname,'ai.mihajlo.mk');return ++calls===1?new Response('',{status:503}):Response.json({ok:true,platform:'linkedin',profile_url:'https://linkedin.com/in/example/',avatar:photo});};
  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'identity-resolver'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'successful');assert.equal(calls,2);
+});
+
+test('300-profile batch keeps all jobs, limits concurrency, bulk polls, and does not expire queued work',async()=>{
+ const f=fixture();let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({snapshot_id:'sd_batch'+calls});};
+ const urls=Array.from({length:300},(_,i)=>`https://linkedin.com/in/batch-${i}/`);
+ assert.equal((await f.call('/api/jobs',{urls:[...urls,'https://linkedin.com/in/too-many/']})).status,400);assert.equal(calls,0);
+ const result=await f.call('/api/jobs',{urls});assert.equal(result.status,202);assert.equal(result.data.jobs.length,300);await f.settle();assert.equal(calls,3);
+ const ids=result.data.jobs.map(j=>j.id);
+ const statuses=await f.call('/api/jobs/status',{ids});await f.settle();assert.equal(statuses.data.jobs.length,300);assert.equal(statuses.data.jobs.filter(j=>j.phase==='queued').length,297);
+ f.sql.prepare("UPDATE avatar_jobs SET created_at=? WHERE status='queued'").run(Date.now()-21*60*1000);
+ await f.call('/api/jobs/status',{ids});await f.settle();assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM avatar_jobs WHERE status='queued'").get().n,297);
+ assert.equal((await f.call('/api/jobs/status',{ids:['invalid']})).status,400);
+});
+test('all 300 Identity Resolver jobs finish without dropping results',async()=>{
+ const f=fixture();let active=0,peak=0,calls=0;
+ globalThis.fetch=async u=>{active++;peak=Math.max(peak,active);calls++;await new Promise(r=>setTimeout(r,1));active--;return Response.json({ok:true,platform:'linkedin',profile_url:new URL(u).searchParams.get('url'),avatar:photo});};
+ const urls=Array.from({length:300},(_,i)=>`https://linkedin.com/in/identity-batch-${i}/`);
+ const result=await f.call('/api/jobs',{urls,provider:'identity-resolver'});await f.settle();
+ const statuses=await f.call('/api/jobs/status',{ids:result.data.jobs.map(j=>j.id)});await f.settle();assert.equal(statuses.data.jobs.length,300);assert.ok(statuses.data.jobs.every(j=>j.status==='successful'));assert.equal(calls,300);assert.ok(peak<=3);
 });

@@ -107,12 +107,12 @@ async function submit(r:Row,env:Env){
   }catch(error){await fail(r.id,error instanceof Error?error.message:'Submission failed.',env);}
 }
 async function drain(env:Env,deadline:number){
-  await db(env).prepare("UPDATE avatar_jobs SET status='failed',error='Lookup timed out. Please retry.',active_key=NULL,completed_at=? WHERE status NOT IN ('successful','failed') AND created_at<?").bind(Date.now(),Date.now()-JOB_TIMEOUT).run();
+  await db(env).prepare("UPDATE avatar_jobs SET status='failed',error='Lookup timed out. Please retry.',active_key=NULL,completed_at=? WHERE status IN ('submitting','running','retrieving') AND submitted_at<?").bind(Date.now(),Date.now()-JOB_TIMEOUT).run();
   // Each claim is one atomic SQLite statement. All workers share the same global limit.
   do {
   const tasks:Promise<void>[]=[];
   for(let i=0;i<MAX_ACTIVE;i++){
-    const claimed=await db(env).prepare("UPDATE avatar_jobs SET status='submitting',attempts=attempts+1,lease_until=0 WHERE id=(SELECT id FROM avatar_jobs WHERE status='queued' ORDER BY created_at LIMIT 1) AND (SELECT COUNT(*) FROM avatar_jobs WHERE status IN ('submitting','running','retrieving'))<? RETURNING *").bind(MAX_ACTIVE).first<Row>();
+    const claimed=await db(env).prepare("UPDATE avatar_jobs SET status='submitting',submitted_at=?,attempts=attempts+1,lease_until=0 WHERE id=(SELECT id FROM avatar_jobs WHERE status='queued' ORDER BY created_at LIMIT 1) AND (SELECT COUNT(*) FROM avatar_jobs WHERE status IN ('submitting','running','retrieving'))<? RETURNING *").bind(Date.now(),MAX_ACTIVE).first<Row>();
     if(!claimed)break;tasks.push(submit(claimed,env));
   }
   if(!tasks.length)break;
@@ -140,7 +140,7 @@ async function create(url:string,store:boolean,origin:string,env:Env,selected:Lo
   return view(current);
 
 }
-async function body(request:Request){if(Number(request.headers.get('content-length')||0)>65536)throw new Error('Request too large.');const text=await request.text();if(text.length>65536)throw new Error('Request too large.');return JSON.parse(text);}
+async function body(request:Request){if(Number(request.headers.get('content-length')||0)>1048576)throw new Error('Request too large.');const text=await request.text();if(text.length>1048576)throw new Error('Request too large.');return JSON.parse(text);}
 export async function handleAvatarJobs(request:Request,env:Env,ctx:Ctx):Promise<Response|null>{
   const url=new URL(request.url),path=url.pathname;
   if(!path.startsWith('/api/jobs')&&!path.startsWith('/api/images/'))return null;
@@ -151,8 +151,16 @@ export async function handleAvatarJobs(request:Request,env:Env,ctx:Ctx):Promise<
       const object=await env.BUCKET?.get('avatars/'+id);if(!object)return json({error:'Image not found.'},404);
       return new Response(object.body,{headers:{'Content-Type':object.httpMetadata?.contentType||'image/jpeg','Cache-Control':'public, max-age=86400','ETag':object.httpEtag,'X-Content-Type-Options':'nosniff'}});
     }
+    if(path==='/api/jobs/status'&&request.method==='POST'){
+      const input=await body(request);
+      if(!Array.isArray(input.ids)||!input.ids.length||input.ids.length>MAX_BATCH||input.ids.some((id:unknown)=>typeof id!=='string'||!/^[a-f0-9]{32}$/.test(id)))return json({error:'Enter 1–300 valid job IDs.'},400);
+      const ids=[...new Set(input.ids)] as string[];
+      const groups:string[][]=[];for(let i=0;i<ids.length;i+=80)groups.push(ids.slice(i,i+80));
+      const rows=await boundedMap(groups,3,async group=>(await db(env).prepare(`SELECT * FROM avatar_jobs WHERE id IN (${group.map(()=>'?').join(',')})`).bind(...group).all<Row>()).results);
+      kick(ctx,env);return json({jobs:rows.flat().map(view)});
+    }
     if(path==='/api/jobs'&&request.method==='POST'){
-      const input=await body(request);const urls=input.urls??[input.url];if(!Array.isArray(urls)||!urls.length||urls.length>MAX_BATCH)return json({error:'Enter 1–20 LinkedIn profile URLs.'},400);
+      const input=await body(request);const urls=input.urls??[input.url];if(!Array.isArray(urls)||!urls.length||urls.length>MAX_BATCH)return json({error:'Enter 1–300 LinkedIn profile URLs.'},400);
       const selected=input.provider??'brightdata';
       if(!['brightdata','identity-resolver'].includes(selected))return json({error:'Choose Bright Data or Identity Resolver.'},400);
       const normalized=[...new Set(urls.map(normalizeProfile))];
