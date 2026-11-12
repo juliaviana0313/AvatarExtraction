@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { normalizeProfile, parseProfile, extractAvatar } from '../lib/avatar.ts';
+assert.equal(normalizeProfile('linkedin.com/in/example/?trk=test'), 'https://www.linkedin.com/in/example/');
+for (const url of ['https://evil.com/in/test','https://linkedin.com.evil.com/in/test','http://linkedin.com/in/test','https://www.linkedin.com/company/test','https://user:password@linkedin.com/in/test','https://linkedin.com:8443/in/test']) assert.throws(()=>normalizeProfile(url));
+const photo='https://media.licdn.com/dms/image/v2/test/profile-displayphoto-shrink_800_800/0/test?e=1&v=2';
+const html=`<meta content="Test Person - Example | LinkedIn" property="og:title"><meta property='og:image' content='${photo.replace('&','&amp;')}'>`;
+assert.deepEqual(parseProfile(html), {avatarUrl:photo,name:'Test Person'});
+assert.equal(parseProfile('<meta property="og:image" content="https://evil.com/photo.jpg">'),null);
+assert.equal(parseProfile('<meta property="og:image" content="https://static.licdn.com/logo.png">'),null);
+const success=await extractAvatar('linkedin.com/in/test',async()=>new Response(html,{headers:{'Content-Type':'text/html'}}));
+assert.equal(success.avatarUrl,photo);
+await assert.rejects(extractAvatar('linkedin.com/in/test',async()=>new Response('',{status:403})),/did not allow/);
+await assert.rejects(extractAvatar('linkedin.com/in/test',async()=>new Response('<html>Sign in</html>',{headers:{'Content-Type':'text/html'}})),/No public profile/);
+await assert.rejects(extractAvatar('linkedin.com/in/test',async()=>new Response('',{status:302,headers:{location:'https://evil.com'}})),/did not allow/);
+console.log('PASS: URL validation, photo parsing, success, blocked access, redirects, and missing-photo handling.');
