@@ -1,7 +1,7 @@
 export const MAX_ACTIVE=3;
 export const MAX_BATCH=300;
 export const JOB_TIMEOUT=20*60*1000;
-export const OUTPUT_FIELDS='name|url|avatar';
+export const OUTPUT_FIELDS='name|url|input_url|avatar|default_avatar|error|error_code';
 export const isTerminal=(status:string)=>status==='successful'||status==='failed';
 export const retryableStatus=(status:number)=>[429,502,503,504].includes(status);
 export const backoff=(attempt:number)=>Math.min(8000,500*2**attempt);

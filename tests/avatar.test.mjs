@@ -75,3 +75,14 @@ assert.equal(validSavedAvatar({...saved,savedAt:Date.now()-86400001}),false);
 assert.equal(validSavedAvatar({...saved,avatarUrl:'javascript:alert(1)'}),false);
 assert.equal(validSavedAvatar({...saved,avatarUrl:photo}),false);
 console.log('PASS: browser-session reuse, URL matching, expiry, and invalid/expired image rejection.');
+
+// Provider capitalization/country-host variants must not reject the requested person.
+for(const slug of ['tanu-relhan-7b2b52264','meghanshah31','paru-parvathi-547844420','vijay-kumar-238b10228']){
+ const requested=`https://www.linkedin.com/in/${slug}/`;
+ const returned=`https://it.linkedin.com/in/${slug[0].toUpperCase()+slug.slice(1)}`;
+ assert.equal(parseBrightProfile([{name:'Example',url:returned,avatar:photo}],requested).profileUrl,requested);
+ assert.equal(parseBrightProfile([{name:'Example',url:returned,input_url:requested,avatar:photo,default_avatar:false}],requested).avatarUrl,photo);
+ assert.throws(()=>parseBrightProfile([{url:'https://www.linkedin.com/in/someone-else/',avatar:photo}],requested),e=>e.code==='PROFILE_MISMATCH');
+}
+assert.throws(()=>parseBrightProfile([{url:'https://linkedin.com/in/test',avatar:'https://static.licdn.com/aero-v1/sc/h/placeholder',default_avatar:true}],'https://www.linkedin.com/in/test/'),e=>e.code==='PHOTO_NOT_AVAILABLE'&&e.message.includes('placeholder'));
+console.log('PASS: country domains, capitalized profile slugs, distinct identities, and accurate placeholder errors.');

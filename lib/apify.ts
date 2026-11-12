@@ -1,4 +1,4 @@
-import {normalizeProfile,isAvatar} from './avatar';
+import {sameProfile,isAvatar} from './avatar';
 import {backoff,retryableStatus} from './job-policy';
 export const APIFY_ACTOR='true-data~linkedin-profile-scraper';
 export const apifyId=(value:unknown):value is string=>typeof value==='string'&&/^[a-zA-Z0-9]{1,80}$/.test(value);
@@ -7,7 +7,7 @@ export function parseApifyProfile(data:unknown,profileUrl:string){
   const r=data[0];
   if(r.error||r.error_code)throw new Error('Apify could not retrieve this profile. Check the URL or retry.');
   const returned=r.inputUrl??r.url;
-  if(typeof returned!=='string'||normalizeProfile(returned)!==profileUrl)throw new Error('Apify returned a different profile. Please retry.');
+  if(typeof returned!=='string'||!sameProfile(returned,profileUrl))throw new Error('Apify returned a different profile. Please retry.');
   if(r.default_avatar===true||typeof r.avatar!=='string'||!isAvatar(r.avatar))throw new Error('Apify found no usable profile photo for this person.');
   return {name:typeof r.name==='string'&&r.name.trim()?r.name:'LinkedIn profile',avatarUrl:r.avatar,profileUrl};
 }

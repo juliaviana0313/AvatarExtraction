@@ -1,10 +1,10 @@
-import {normalizeProfile,isAvatar} from './avatar';
+import {sameProfile,isAvatar} from './avatar';
 import {backoff,retryableStatus} from './job-policy';
 export function parseApishProfile(data:unknown,profileUrl:string){
   if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('API.sh returned an invalid response.');
   const r=data as Record<string,unknown>;
   if(r.error||r.success===false)throw new Error('API.sh could not retrieve this profile. Check the URL or try another provider.');
-  if(typeof r.url!=='string'||normalizeProfile(r.url)!==profileUrl)throw new Error('API.sh returned a different profile. Please retry.');
+  if(typeof r.url!=='string'||!sameProfile(r.url,profileUrl))throw new Error('API.sh returned a different profile. Please retry.');
   if(typeof r.image!=='string'||!isAvatar(r.image))throw new Error('API.sh found no usable profile photo for this person.');
   return {name:typeof r.name==='string'&&r.name.trim()?r.name:'LinkedIn profile',avatarUrl:r.image,profileUrl};
 }

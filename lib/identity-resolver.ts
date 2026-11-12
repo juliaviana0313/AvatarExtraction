@@ -1,4 +1,4 @@
-import {normalizeProfile,isAvatar} from './avatar';
+import {sameProfile,isAvatar} from './avatar';
 import {backoff,retryableStatus} from './job-policy';
 export type LookupProvider='brightdata'|'identity-resolver'|'apify'|'apish';
 export const providerLabel=(provider:LookupProvider)=>provider==='apish'?'API.sh':provider==='apify'?'Apify':provider==='identity-resolver'?'Identity Resolver':'Bright Data';
@@ -9,7 +9,7 @@ export function parseIdentityProfile(data:unknown,profileUrl:string){
   if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('Identity Resolver returned an invalid response.');
   const record=data as Record<string,unknown>;
   if(record.ok!==true)throw new Error('Identity Resolver could not retrieve this profile. Check the URL or retry.');
-  if(record.platform!=='linkedin'||typeof record.profile_url!=='string'||normalizeProfile(record.profile_url)!==profileUrl)throw new Error('Identity Resolver returned a different profile. Please retry.');
+  if(record.platform!=='linkedin'||typeof record.profile_url!=='string'||!sameProfile(record.profile_url,profileUrl))throw new Error('Identity Resolver returned a different profile. Please retry.');
   const avatar=[record.avatar,record.picture].find(v=>typeof v==='string'&&isResolverPhoto(v));
   if(typeof avatar!=='string')throw new Error('Identity Resolver found no usable profile photo for this person.');
   return {name:typeof record.name==='string'&&record.name.trim()?record.name:'LinkedIn profile',avatarUrl:avatar,profileUrl};

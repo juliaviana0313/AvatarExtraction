@@ -17,6 +17,10 @@ export function normalizeProfile(value: unknown): string {
   }
   return `https://www.linkedin.com${url.pathname.replace(/\/$/, '')}/`;
 }
+// LinkedIn vanity names are case-insensitive; providers also return country subdomains.
+export function sameProfile(left:unknown,right:unknown):boolean {
+  try{return normalizeProfile(left).toLowerCase()===normalizeProfile(right).toLowerCase();}catch{return false;}
+}
 function decode(value: string): string {
   return value.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => { const code = Number(n); return code <= 0x10ffff ? String.fromCodePoint(code) : ''; });
 }
@@ -104,8 +108,8 @@ export function parseBrightProfile(data: unknown, profileUrl: string) {
   // Verify the input association; never use another person's recommended profile photo.
   const input = record.input as {url?:unknown} | undefined;
   const returnedUrl = record.input_url ?? input?.url ?? record.url;
-  if (returnedUrl && normalizeProfile(returnedUrl) !== profileUrl) throw new AvatarLookupError('PROFILE_MISMATCH','The lookup service returned a different profile. Please try again.');
-  if (record.default_avatar === true || typeof record.avatar !== 'string' || !isAvatar(record.avatar)) throw new AvatarLookupError('PHOTO_NOT_AVAILABLE','The profile lookup service found no public profile photo for this person.');
+  if (returnedUrl && !sameProfile(returnedUrl,profileUrl)) throw new AvatarLookupError('PROFILE_MISMATCH','The lookup service returned a different profile. Please try again.');
+  if (record.default_avatar === true || typeof record.avatar !== 'string' || !isAvatar(record.avatar)) throw new AvatarLookupError('PHOTO_NOT_AVAILABLE','Bright Data returned no usable personal photo. The result may contain only LinkedIn’s placeholder; photo visibility could not be determined.');
   return {name:typeof record.name === 'string' && record.name.trim() ? record.name : 'LinkedIn profile', avatarUrl:record.avatar, profileUrl};
 }
 export async function beginBrightLookup(value: unknown, key: string, fetcher: typeof fetch = fetch) {

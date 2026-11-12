@@ -23,7 +23,7 @@ test('durable queue: immediate response, global concurrency, authenticated callb
  const created=await f.call('/api/jobs',{urls});assert.equal(created.status,202);assert.equal(created.data.jobs.length,5);assert.ok(created.data.jobs.every(j=>j.status==='pending'));
  await f.settle();assert.equal(submits.length,3);assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM avatar_jobs WHERE status='queued'").get().n,2);
  await f.call('/api/jobs',{urls:[urls[0]]});await f.settle();assert.equal(submits.length,3);assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM avatar_jobs').get().n,5);
- const target=submits[0];assert.equal(target.url.searchParams.get('custom_output_fields'),'name|url|avatar');assert.equal(target.body.custom_output_fields,'name|url|avatar');
+ const target=submits[0];assert.equal(target.url.searchParams.get('custom_output_fields'),'name|url|input_url|avatar|default_avatar|error|error_code');assert.equal(target.body.custom_output_fields,'name|url|input_url|avatar|default_avatar|error|error_code');
  const callback=new URL(target.url.searchParams.get('endpoint')).pathname;const payload=[{url:target.body.input[0].url,name:'Example',avatar:photo}];
  assert.equal((await f.call(callback,payload)).status,401);
  assert.equal((await f.call(callback,payload,{authorization:target.url.searchParams.get('auth_header')})).status,200);await f.settle();assert.equal(submits.length,4);
