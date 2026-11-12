@@ -175,3 +175,17 @@ test('API.sh transient errors retry only its own endpoint',async()=>{
  globalThis.fetch=async u=>{assert.equal(new URL(u).hostname,'api.api.sh');return ++calls===1?new Response('',{status:503}):Response.json({name:'Example',url:'https://linkedin.com/in/example/',image:photo});};
  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apish'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'successful');assert.equal(calls,2);
 });
+
+test('Identity Resolver preserves the specific cause behind HTTP 422 without blindly retrying',async()=>{
+ for(const [upstream,expected] of [[999,/denied.*999/],[429,/rate-limited.*429/],[200,/HTTP 200.*both name and picture.*which field/],[404,/HTTP 404/]]){
+  const f=fixture();let calls=0;
+  globalThis.fetch=async()=>{calls++;return Response.json({ok:false,error:{code:'profile_not_resolved',message:'untrusted provider text'},required_fields:['name','picture'],last_status_code:upstream},{status:422});};
+  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'identity-resolver'});await f.settle();
+  const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/profile_not_resolved/);assert.match(done.error,expected);assert.equal(calls,1);assert.ok(!done.error.includes('untrusted'));
+ }
+});
+test('Identity Resolver handles non-JSON 422 responses with an honest fallback',async()=>{
+ const f=fixture();globalThis.fetch=async()=>new Response('<html>error</html>',{status:422});
+ const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'identity-resolver'});await f.settle();
+ const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/no specific reason was supplied/);
+});
