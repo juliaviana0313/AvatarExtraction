@@ -19,7 +19,7 @@ The job tests use in-memory SQLite and mocked provider/image responses; they do 
 
 ## Request flow
 
-`POST /api/jobs` accepts `{urls: string[], storeImages?: boolean}`. Every normalized URL checks the shared D1 cache first (24-hour TTL, shortened by external image expiry). Cache hits return immediately without provider requests. Cache misses are persisted before returning HTTP 202. Duplicate active requests with the same storage preference reuse the same job.
+`POST /api/jobs` accepts `{urls: string[], storeImages?: boolean, provider?: "brightdata" | "identity-resolver"}`. Omitted provider defaults to Bright Data. The selector routes only to the chosen provider; cache keys, active jobs, and history retain that choice. Retry uses the failed entry’s original provider. Existing jobs migrate to Bright Data. Every normalized URL checks the shared D1 cache first (24-hour TTL, shortened by external image expiry). Cache hits return immediately without provider requests. Cache misses are persisted before returning HTTP 202. Duplicate active requests with the same storage preference reuse the same job.
 
 Atomic database claims enforce a global maximum of three active jobs across Worker instances. Submission runs through `waitUntil`. Bright Data receives a per-job authenticated callback URL; its completion callback persists the result and starts the next queued work without requiring an open browser. `GET /api/jobs/:id` returns durable status and also runs recovery checks. The browser polls local job status every 2.5 seconds, with an 8-second reconnect delay after network errors. IDs are random read capabilities; there is no public job-list endpoint.
 
@@ -42,3 +42,9 @@ History is stored in sessionStorage for the current tab (up to 50 entries); pend
 ## Deployment
 
 Sites provisions D1 `DB` and R2 `BUCKET` from `.openai/hosting.json`. Drizzle migrations define the cache and job tables. Preserve existing applied migrations. Provider retrieval time can exceed one minute for uncached profiles; asynchronous processing improves responsiveness and caching eliminates repeated scrapes.
+
+## Identity Resolver
+
+The Identity Resolver option sends a server-side GET to `https://ai.mihajlo.mk/api/identity-resolver/v1/resolve` with `platform=linkedin`, the encoded profile `url`, and `Accept: application/json`. It requires no API key, and the Bright Data key is never sent to it. A result must have `ok: true`, `platform: "linkedin"`, a matching `profile_url`, and a supported `avatar` or `picture`. Only name, profile URL, and photo URL are retained. Resolver photos from its `/storage/identity-resolver/linkedin/` path are supported alongside LinkedIn image URLs.
+
+The GET runs inside the same bounded background queue, with retries for transient errors and an eight-second total request budget. Unlike Bright Data, it returns the result directly and needs no callback. Its internal scrape duration is not exposed: submission timing includes server response wait, retrieval timing covers reading/parsing the response, and scraping timing stays null. Provider switching never silently falls back or uses the other provider’s cached result.

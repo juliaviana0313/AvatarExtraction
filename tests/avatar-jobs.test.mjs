@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
 import {build} from 'esbuild';
 const outfile='/tmp/avatar-jobs-test.mjs';
 await build({entryPoints:['lib/avatar-jobs.ts'],bundle:true,platform:'node',format:'esm',outfile});
@@ -9,7 +9,7 @@ const {handleAvatarJobs}=await import(outfile);
 const photo='https://media.licdn.com/profile-displayphoto/test.jpg';
 function fixture(){
  const sql=new DatabaseSync(':memory:');
- for(const file of ['0000_exotic_tarantula.sql','0001_nervous_mephistopheles.sql'])sql.exec(readFileSync('drizzle/'+file,'utf8'));
+ for(const file of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort())sql.exec(readFileSync('drizzle/'+file,'utf8'));
  function prepare(query){let args=[];return {bind(...values){args=values;return this;},async first(){return sql.prepare(query).get(...args)||null;},async all(){return {results:sql.prepare(query).all(...args)};},async run(){return sql.prepare(query).run(...args);}};}
  const objects=new Map();const env={BRIGHTDATA_API_KEY:'test-key',DB:{prepare,async batch(items){return Promise.all(items.map(x=>x.run()));}},BUCKET:{async put(k,v,meta){objects.set(k,{body:v,httpMetadata:meta.httpMetadata,httpEtag:'test'});},async get(k){return objects.get(k);}}};
  let tasks=[];const ctx={waitUntil(p){tasks.push(p);}};
@@ -50,4 +50,40 @@ test('invalid input rejected before provider; ambiguous POST timeout not retried
  const f=fixture();let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('timeout');};
  assert.equal((await f.call('/api/jobs',{urls:['https://example.com']})).status,400);assert.equal(calls,0);
  const r=await f.call('/api/jobs',{urls:['https://linkedin.com/in/timeout/']});await f.settle();assert.equal(calls,1);const done=(await f.call('/api/jobs/'+r.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/outcome is unknown/);
+});
+
+test('Identity Resolver uses GET without credentials and isolates cache/history from Bright Data',async()=>{
+ const f=fixture();const url='https://www.linkedin.com/in/example/';const resolverPhoto='https://ai.mihajlo.mk/storage/identity-resolver/linkedin/ac/example/profile-picture.jpg';
+ let resolverCalls=0,brightCalls=0;
+ globalThis.fetch=async(u,options)=>{
+  const target=new URL(u);
+  if(target.hostname==='ai.mihajlo.mk'){
+   resolverCalls++;assert.equal(target.pathname,'/api/identity-resolver/v1/resolve');assert.equal(target.searchParams.get('platform'),'linkedin');assert.equal(target.searchParams.get('url'),url);assert.equal(options.method,'GET');assert.equal(options.headers.Accept,'application/json');assert.equal(options.headers.Authorization,undefined);
+   return Response.json({ok:true,platform:'linkedin',profile_url:url,name:'Example',avatar:resolverPhoto});
+  }
+  assert.equal(target.hostname,'api.brightdata.com');brightCalls++;return Response.json({snapshot_id:'sd_bright'});
+ };
+ const created=await f.call('/api/jobs',{urls:[url],provider:'identity-resolver'});assert.equal(created.status,202);await f.settle();
+ const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.provider,'identity-resolver');assert.equal(done.status,'successful');assert.equal(done.result.avatarUrl,resolverPhoto);assert.equal(brightCalls,0);
+ const cached=await f.call('/api/jobs',{urls:[url],provider:'identity-resolver'});await f.settle();assert.equal(cached.data.jobs[0].cacheHit,true);assert.equal(resolverCalls,1);
+ const bright=await f.call('/api/jobs',{urls:[url],provider:'brightdata'});await f.settle();assert.equal(bright.data.jobs[0].cacheHit,false);assert.equal(bright.data.jobs[0].provider,'brightdata');assert.equal(brightCalls,1);assert.equal(resolverCalls,1);
+ assert.equal((await f.call('/api/jobs/'+done.id+'/callback',{ok:true})).status,404);
+});
+test('Identity Resolver works without Bright Data key and stores permitted images',async()=>{
+ const f=fixture();delete f.env.BRIGHTDATA_API_KEY;
+ const url='https://www.linkedin.com/in/example/';const image='https://ai.mihajlo.mk/storage/identity-resolver/linkedin/ac/example/profile-picture.jpg';
+ globalThis.fetch=async u=>String(u).includes('/resolve?')?Response.json({ok:true,platform:'linkedin',profile_url:'https://mg.linkedin.com/in/example',name:'Example',picture:image}):new Response(new Uint8Array([255,216,255,0]));
+ const created=await f.call('/api/jobs',{urls:[url],provider:'identity-resolver',storeImages:true});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'successful');assert.match(done.result.avatarUrl,/^\/api\/images\//);assert.equal(f.objects.size,1);
+});
+test('Identity Resolver rejects missing photos, mismatched profiles, unsafe URLs and invalid providers',async()=>{
+ for(const record of [{ok:false},{ok:true,platform:'linkedin',profile_url:'https://linkedin.com/in/other/',avatar:photo},{ok:true,platform:'linkedin',profile_url:'https://linkedin.com/in/example/',avatar:null},{ok:true,platform:'linkedin',profile_url:'https://linkedin.com/in/example/',avatar:'http://127.0.0.1/internal'}]){
+  const f=fixture();let calls=0;globalThis.fetch=async()=>{calls++;return Response.json(record);};
+  assert.equal((await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'invalid'})).status,400);assert.equal(calls,0);
+  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'identity-resolver',storeImages:true});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/Identity Resolver/);assert.equal(calls,1);assert.equal(f.objects.size,0);
+ }
+});
+test('Identity Resolver retries transient errors without falling back to Bright Data',async()=>{
+ const f=fixture();let calls=0;
+ globalThis.fetch=async u=>{assert.equal(new URL(u).hostname,'ai.mihajlo.mk');return ++calls===1?new Response('',{status:503}):Response.json({ok:true,platform:'linkedin',profile_url:'https://linkedin.com/in/example/',avatar:photo});};
+ const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'identity-resolver'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'successful');assert.equal(calls,2);
 });

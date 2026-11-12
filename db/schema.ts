@@ -10,6 +10,7 @@ export const avatarJobs = sqliteTable('avatar_jobs', {
   cacheKey: text('cache_key').notNull(),
   activeKey: text('active_key').unique(),
   profileUrl: text('profile_url').notNull(),
+  provider: text('provider').notNull().default('brightdata'),
   origin: text('origin').notNull(),
   status: text('status').notNull(),
   storageAllowed: integer('storage_allowed').notNull().default(0),

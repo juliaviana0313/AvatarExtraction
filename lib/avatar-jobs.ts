@@ -1,8 +1,9 @@
+import {type LookupProvider,parseIdentityProfile,resolveIdentity,isResolverPhoto} from './identity-resolver';
 import {normalizeProfile,parseBrightProfile,isAvatar} from './avatar';
 import {MAX_ACTIVE,MAX_BATCH,JOB_TIMEOUT,OUTPUT_FIELDS,isTerminal,retryableStatus,backoff,imageType,boundedMap} from './job-policy';
 interface Env {DB?:D1Database;BUCKET?:R2Bucket;BRIGHTDATA_API_KEY?:string}
 type Ctx={waitUntil(promise:Promise<unknown>):void};
-type Row={id:string;cache_key:string;active_key:string|null;profile_url:string;origin:string;status:string;storage_allowed:number;snapshot:string|null;result:string|null;error:string|null;created_at:number;submitted_at:number|null;ready_at:number|null;completed_at:number|null;next_check:number;lease_until:number;attempts:number;submission_ms:number|null;scraping_ms:number|null;retrieval_ms:number|null;storage_ms:number|null;image_load_ms:number|null;cache_hit:number};
+type Row={provider:LookupProvider;id:string;cache_key:string;active_key:string|null;profile_url:string;origin:string;status:string;storage_allowed:number;snapshot:string|null;result:string|null;error:string|null;created_at:number;submitted_at:number|null;ready_at:number|null;completed_at:number|null;next_check:number;lease_until:number;attempts:number;submission_ms:number|null;scraping_ms:number|null;retrieval_ms:number|null;storage_ms:number|null;image_load_ms:number|null;cache_hit:number};
 const base='https://api.brightdata.com/datasets/v3';
 const dataset='gd_l1viktl72bvl7bjuj0';
 const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
@@ -10,10 +11,10 @@ const db=(env:Env)=>{if(!env.DB)throw new Error('Job database unavailable.');ret
 const key=(env:Env)=>env.BRIGHTDATA_API_KEY||process.env.BRIGHTDATA_API_KEY||'';
 const enc=new TextEncoder();
 const hex=(data:ArrayBuffer)=>Array.from(new Uint8Array(data),b=>b.toString(16).padStart(2,'0')).join('');
-async function cacheKey(url:string,env:Env){return hex(await crypto.subtle.digest('SHA-256',enc.encode(key(env)+'\n'+url)));}
+async function cacheKey(url:string,env:Env,selected:LookupProvider){return hex(await crypto.subtle.digest('SHA-256',enc.encode((selected==='brightdata'?key(env):'identity-resolver:v1')+'\n'+url)));}
 async function callbackKey(id:string,env:Env){const k=await crypto.subtle.importKey('raw',enc.encode(key(env)),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',k,enc.encode('avatar-callback:'+id)));}
 async function row(id:string,env:Env){return db(env).prepare('SELECT * FROM avatar_jobs WHERE id=?').bind(id).first<Row>();}
-function view(r:Row){return {id:r.id,profileUrl:r.profile_url,status:isTerminal(r.status)?r.status:'pending',phase:r.status,error:r.error,result:r.result?JSON.parse(r.result):null,cacheHit:!!r.cache_hit,timings:{queueMs:r.submitted_at?r.submitted_at-r.created_at:null,submissionMs:r.submission_ms,scrapingMs:r.scraping_ms,retrievalMs:r.retrieval_ms,storageMs:r.storage_ms,imageLoadMs:r.image_load_ms,totalMs:r.completed_at?r.completed_at-r.created_at:null}};}
+function view(r:Row){return {id:r.id,provider:r.provider,profileUrl:r.profile_url,status:isTerminal(r.status)?r.status:'pending',phase:r.status,error:r.error,result:r.result?JSON.parse(r.result):null,cacheHit:!!r.cache_hit,timings:{queueMs:r.submitted_at?r.submitted_at-r.created_at:null,submissionMs:r.submission_ms,scrapingMs:r.scraping_ms,retrievalMs:r.retrieval_ms,storageMs:r.storage_ms,imageLoadMs:r.image_load_ms,totalMs:r.completed_at?r.completed_at-r.created_at:null}};}
 async function fail(id:string,message:string,env:Env){await db(env).prepare("UPDATE avatar_jobs SET status='failed',error=?,completed_at=?,active_key=NULL,lease_until=0 WHERE id=? AND status NOT IN ('successful','failed')").bind(message,Date.now(),id).run();console.warn(JSON.stringify({event:'avatar_job_failed',id,error:message}));}
 class ProviderError extends Error {status:number;constructor(status:number,message:string){super(message);this.status=status;}}
 async function provider(path:string,env:Env,body?:unknown,retry=true):Promise<unknown>{
@@ -38,7 +39,7 @@ async function provider(path:string,env:Env,body?:unknown,retry=true):Promise<un
 }
 async function storePhoto(r:Row,source:string,env:Env):Promise<string>{
   if(!r.storage_allowed||!env.BUCKET)return source;
-  if(!isAvatar(source))throw new Error('Invalid photo source.');
+  if(!(r.provider==='identity-resolver'?isResolverPhoto(source):isAvatar(source)))throw new Error('Invalid photo source.');
   const started=Date.now();
   try{
     const response=await fetch(source,{redirect:'manual',signal:AbortSignal.timeout(5000)});
@@ -56,7 +57,7 @@ async function storePhoto(r:Row,source:string,env:Env):Promise<string>{
 }
 async function finish(r:Row,data:unknown,env:Env,retrievalStarted:number){
   try{
-    const photo=parseBrightProfile(data,r.profile_url);
+    const photo=r.cache_hit&&r.result?JSON.parse(r.result):r.provider==='identity-resolver'?parseIdentityProfile(data,r.profile_url):parseBrightProfile(data,r.profile_url);
     const retrievalMs=Date.now()-retrievalStarted;
     photo.avatarUrl=await storePhoto(r,photo.avatarUrl,env);
     let expires=Date.now()+86400000;
@@ -92,6 +93,13 @@ async function submit(r:Row,env:Env){
       await finish(r,[{name:photo.name,url:r.profile_url,avatar:photo.avatarUrl}],env,started);
       return;
     }
+    if(r.provider==='identity-resolver'){
+      const resolved=await resolveIdentity(r.profile_url);
+      await db(env).prepare('UPDATE avatar_jobs SET submitted_at=?,submission_ms=? WHERE id=?').bind(started,resolved.submissionMs,r.id).run();
+      r.submission_ms=resolved.submissionMs;
+      await finish(r,resolved.data,env,resolved.retrievalStarted);
+      return;
+    }
     const params=new URLSearchParams({dataset_id:dataset,format:'json',include_errors:'true',custom_output_fields:OUTPUT_FIELDS,notify:'true',endpoint:`${r.origin}/api/jobs/${r.id}/callback`,auth_header:`Bearer ${await callbackKey(r.id,env)}`,uncompressed_webhook:'true'});
     const data=await provider('/trigger?'+params,env,{input:[{url:r.profile_url}],custom_output_fields:OUTPUT_FIELDS}) as {snapshot_id?:string};
     if(!data.snapshot_id||!/^s[d]?_[\w]+$/.test(data.snapshot_id))throw new Error('The provider returned an invalid job.');
@@ -112,23 +120,23 @@ async function drain(env:Env,deadline:number){
   } while(Date.now()<deadline);
 }
 async function service(env:Env){
-  const deadline=Date.now()+20000;
+  const deadline=Date.now()+12000;
   const active=await db(env).prepare("SELECT * FROM avatar_jobs WHERE status='running' AND next_check<=? ORDER BY next_check LIMIT 3").bind(Date.now()).all<Row>();
-  await boundedMap(active.results,MAX_ACTIVE,r=>check(r,env));await drain(env,deadline);
+  await boundedMap(active.results,MAX_ACTIVE,r=>check(r,env));if(Date.now()<deadline)await drain(env,deadline);
 }
 function kick(ctx:Ctx,env:Env){ctx.waitUntil(service(env).catch(()=>console.warn('avatar_background_service_failed')));}
-async function create(url:string,store:boolean,origin:string,env:Env){
-  const profileUrl=normalizeProfile(url),id=crypto.randomUUID().replace(/-/g,''),ck=await cacheKey(profileUrl,env),now=Date.now();
+async function create(url:string,store:boolean,origin:string,env:Env,selected:LookupProvider){
+  const profileUrl=normalizeProfile(url),id=crypto.randomUUID().replace(/-/g,''),ck=await cacheKey(profileUrl,env,selected),now=Date.now();
   const cached=await db(env).prepare('SELECT payload FROM avatar_cache WHERE key=? AND expires>?').bind(ck,now).first<{payload:string}>();
   const photo=cached?JSON.parse(cached.payload).data:null;
   if(photo?.avatarUrl&&(!store||photo.avatarUrl.startsWith('/api/images/'))){
-    await db(env).prepare("INSERT INTO avatar_jobs(id,cache_key,profile_url,origin,status,storage_allowed,result,created_at,completed_at,cache_hit) VALUES(?,?,?,?,'successful',?,?,?,?,1)").bind(id,ck,profileUrl,origin,store?1:0,JSON.stringify(photo),now,Date.now()).run();
+    await db(env).prepare("INSERT INTO avatar_jobs(id,cache_key,profile_url,origin,status,storage_allowed,result,created_at,completed_at,cache_hit,provider) VALUES(?,?,?,?,'successful',?,?,?,?,1,?)").bind(id,ck,profileUrl,origin,store?1:0,JSON.stringify(photo),now,Date.now(),selected).run();
     return view((await row(id,env))!);
   }
   const activeKey=ck+':'+(store?'store':'link');
-  await db(env).prepare("INSERT OR IGNORE INTO avatar_jobs(id,cache_key,active_key,profile_url,origin,status,storage_allowed,created_at,result,cache_hit) VALUES(?,?,?,?,?,'queued',?,?,?,?)").bind(id,ck,activeKey,profileUrl,origin,store?1:0,now,photo?JSON.stringify(photo):null,photo?1:0).run();
+  await db(env).prepare("INSERT OR IGNORE INTO avatar_jobs(id,cache_key,active_key,profile_url,origin,status,storage_allowed,created_at,result,cache_hit,provider) VALUES(?,?,?,?,?,'queued',?,?,?,?,?)").bind(id,ck,activeKey,profileUrl,origin,store?1:0,now,photo?JSON.stringify(photo):null,photo?1:0,selected).run();
   const current=await db(env).prepare('SELECT * FROM avatar_jobs WHERE id=? OR active_key=? ORDER BY created_at DESC LIMIT 1').bind(id,activeKey).first<Row>();
-  if(!current)return create(url,store,origin,env);
+  if(!current)return create(url,store,origin,env,selected);
   return view(current);
 
 }
@@ -145,12 +153,15 @@ export async function handleAvatarJobs(request:Request,env:Env,ctx:Ctx):Promise<
     }
     if(path==='/api/jobs'&&request.method==='POST'){
       const input=await body(request);const urls=input.urls??[input.url];if(!Array.isArray(urls)||!urls.length||urls.length>MAX_BATCH)return json({error:'Enter 1–20 LinkedIn profile URLs.'},400);
+      const selected=input.provider??'brightdata';
+      if(!['brightdata','identity-resolver'].includes(selected))return json({error:'Choose Bright Data or Identity Resolver.'},400);
       const normalized=[...new Set(urls.map(normalizeProfile))];
-      const items=await boundedMap(normalized,3,u=>create(u,input.storeImages===true,url.origin,env));kick(ctx,env);return json({jobs:items},items.some(j=>j.status==='pending')?202:200);
+      const items=await boundedMap(normalized,3,u=>create(u,input.storeImages===true,url.origin,env,selected));kick(ctx,env);return json({jobs:items},items.some(j=>j.status==='pending')?202:200);
     }
     const match=path.match(/^\/api\/jobs\/([a-f0-9]{32})(?:\/(callback|metrics))?$/);if(!match)return json({error:'Not found.'},404);
     const r=await row(match[1],env);if(!r)return json({error:'Job not found.'},404);
     if(match[2]==='callback'&&request.method==='POST'){
+      if(r.provider!=='brightdata')return json({error:'Not found.'},404);
       if(request.headers.get('authorization')!==`Bearer ${await callbackKey(r.id,env)}`)return json({error:'Unauthorized.'},401);
       if(isTerminal(r.status))return json({ok:true});
       const payload=await body(request);if(payload.snapshot_id&&r.snapshot&&payload.snapshot_id!==r.snapshot)return json({error:'Snapshot mismatch.'},400);

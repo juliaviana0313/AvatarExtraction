@@ -15,6 +15,13 @@
       "when": 1794509773233,
       "tag": "0001_nervous_mephistopheles",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794512343962,
+      "tag": "0002_last_eternals",
+      "breakpoints": true
     }
   ]
 }

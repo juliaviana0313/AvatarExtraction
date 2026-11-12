@@ -1,0 +1,1 @@
+ALTER TABLE `avatar_jobs` ADD `provider` text DEFAULT 'brightdata' NOT NULL;
