@@ -1,3 +1,12 @@
+export class AvatarLookupError extends Error {
+  code: string;
+  upstreamStatus?: number;
+  constructor(code: string, message: string, upstreamStatus?: number) {
+    super(message); this.name = 'AvatarLookupError'; this.code = code; this.upstreamStatus = upstreamStatus;
+  }
+}
+const blockedMessage = 'LinkedIn blocked this server’s request. This does not mean your profile or photo is private. Automatic lookup needs a profile-data service connected by the dashboard owner.';
+
 export function normalizeProfile(value: unknown): string {
   if (typeof value !== 'string' || value.length > 2048) throw new Error('Enter a valid LinkedIn profile URL.');
   const input = value.trim();
@@ -34,13 +43,21 @@ export function parseProfile(html: string) {
 export async function extractAvatar(value: unknown, fetcher: typeof fetch = fetch) {
   const profileUrl = normalizeProfile(value);
   const response = await fetcher(profileUrl, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'AvatarExtraction/1.0', Accept: 'text/html', 'Accept-Language': 'en-US,en;q=0.9' } });
-  if (!response.ok) throw new Error('LinkedIn did not allow access to this profile. Check that the profile and photo are public, then try again.');
+  if ([999, 401, 403, 429].includes(response.status) || (response.status >= 300 && response.status < 400)) {
+    throw new AvatarLookupError('LINKEDIN_ACCESS_BLOCKED', blockedMessage, response.status);
+  }
+  if (response.status === 404) throw new AvatarLookupError('PROFILE_NOT_FOUND', 'LinkedIn could not find that profile. Check the profile URL.', 404);
+  if (!response.ok) throw new AvatarLookupError('LINKEDIN_UPSTREAM_ERROR', 'LinkedIn could not complete the request. Please try again later.', response.status);
   if (!response.headers.get('content-type')?.includes('text/html')) throw new Error('LinkedIn returned an unexpected response. Please try again later.');
   const reader = response.body?.getReader();
   if (!reader) throw new Error('LinkedIn returned an empty response.');
   let html = ''; let size = 0; const decoder = new TextDecoder();
   try { while (true) { const {done, value} = await reader.read(); if (done) break; size += value.length; if (size > 2_000_000) throw new Error('The profile response was too large to process.'); html += decoder.decode(value, {stream:true}); } } finally { await reader.cancel(); }
-  const result = parseProfile(html + decoder.decode());
-  if (!result) throw new Error('No public profile photo was found. LinkedIn may require sign-in, or this person may have hidden their photo.');
+  html += decoder.decode();
+  if (/<(?:form|iframe)\b[^>]*(?:authwall|checkpoint|challenge|login-submit)/i.test(html) || /<title[^>]*>[^<]*(?:sign in|log in|security verification)/i.test(html)) {
+    throw new AvatarLookupError('LINKEDIN_ACCESS_BLOCKED', blockedMessage, response.status);
+  }
+  const result = parseProfile(html);
+  if (!result) throw new AvatarLookupError('PHOTO_NOT_AVAILABLE', 'LinkedIn did not return a usable profile photo. We cannot determine the photo’s visibility from this response.');
   return {...result, profileUrl};
 }
