@@ -66,7 +66,7 @@ const brightBase = 'https://api.brightdata.com/datasets/v3';
 const dataset = 'gd_l1viktl72bvl7bjuj0';
 export async function brightRequest(path: string, key: string, body?: unknown, fetcher: typeof fetch = fetch): Promise<unknown> {
   if (!key.trim()) throw new AvatarLookupError('PROVIDER_NOT_CONFIGURED', 'The dashboard owner needs to configure the profile lookup service.');
-  const response = await fetcher(brightBase + path, {method: body === undefined ? 'GET' : 'POST', redirect:'error', signal:AbortSignal.timeout(25000), headers:{Authorization:`Bearer ${key}`, 'Content-Type':'application/json'}, ...(body === undefined ? {} : {body:JSON.stringify(body)})});
+  const response = await fetcher(brightBase + path, {method: body === undefined ? 'GET' : 'POST', redirect:'manual', signal:AbortSignal.timeout(25000), headers:{Authorization:`Bearer ${key}`, 'Content-Type':'application/json'}, ...(body === undefined ? {} : {body:JSON.stringify(body)})});
   const raw = await response.text();
   // Provider errors can be plain text. Never forward arbitrary upstream text or credentials.
   if (/customer is not active|account is (?:inactive|suspended)|activate (?:your|the) account/i.test(raw)) throw new AvatarLookupError('PROVIDER_ACCOUNT_INACTIVE', 'The Bright Data account is not active. The dashboard owner must activate it in Bright Data before avatar lookup can work.', response.status);

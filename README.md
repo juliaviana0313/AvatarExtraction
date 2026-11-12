@@ -21,7 +21,7 @@ npm run build
 
 ## Provider configuration
 
-Set `BRIGHTDATA_API_KEY` in the ignored local `.env` for development and as a secret in Sites runtime environment variables for production. The hosted key is read from Cloudflare bindings; `.env` is never deployed. Activate the Bright Data account and enable access to its LinkedIn Profiles scraper (`gd_l1viktl72bvl7bjuj0`).
+Set `BRIGHTDATA_API_KEY` in the ignored local `.env` for development and as a secret in Sites runtime environment variables for production. The hosted key is read from the server runtime environment; `.env` is never deployed. Activate the Bright Data account and enable access to its LinkedIn Profiles scraper (`gd_l1viktl72bvl7bjuj0`).
 
 The browser calls `/api/avatar` with `{url}` once, then polls with the returned signed `{job}` token. Tokens expire in 30 minutes and bind each snapshot to the requested profile; the browser never receives the API key. The frontend waits up to ten minutes. Public visitors need no sign-in. Lookups use the owner's Bright Data account and may consume provider credits.
 

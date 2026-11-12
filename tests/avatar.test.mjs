@@ -24,7 +24,7 @@ const {beginBrightLookup,pollBrightLookup,parseBrightProfile,brightRequest,signL
 const sampleKey='test-key-not-a-real-credential';
 let starts=0;
 const begin=await beginBrightLookup('linkedin.com/in/test',sampleKey,async(url,options)=>{
-  starts++; assert.ok(String(url).startsWith('https://api.brightdata.com/datasets/v3/trigger?'));
+  starts++; assert.equal(options.redirect,'manual'); assert.ok(String(url).startsWith('https://api.brightdata.com/datasets/v3/trigger?'));
   assert.equal(options.headers.Authorization,`Bearer ${sampleKey}`);
   assert.deepEqual(JSON.parse(options.body),{input:[{url:'https://www.linkedin.com/in/test/'}]});
   return Response.json({snapshot_id:'sd_test123'});
