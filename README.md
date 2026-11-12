@@ -19,7 +19,7 @@ The job tests use in-memory SQLite and mocked provider/image responses; they do 
 
 ## Request flow
 
-`POST /api/jobs` accepts `{urls: string[], storeImages?: boolean, provider?: "brightdata" | "identity-resolver" | "apify"}`. Omitted provider defaults to Bright Data. The selector routes only to the chosen provider; cache keys, active jobs, and history retain that choice. Retry uses the failed entry’s original provider. Existing jobs migrate to Bright Data. Every normalized URL checks the shared D1 cache first (24-hour TTL, shortened by external image expiry). Cache hits return immediately without provider requests. Cache misses are persisted before returning HTTP 202. Duplicate active requests with the same storage preference reuse the same job.
+`POST /api/jobs` accepts `{urls: string[], storeImages?: boolean, provider?: "brightdata" | "identity-resolver" | "apify" | "apish"}`. Omitted provider defaults to Bright Data. The selector routes only to the chosen provider; cache keys, active jobs, and history retain that choice. Retry uses the failed entry’s original provider. Existing jobs migrate to Bright Data. Every normalized URL checks the shared D1 cache first (24-hour TTL, shortened by external image expiry). Cache hits return immediately without provider requests. Cache misses are persisted before returning HTTP 202. Duplicate active requests with the same storage preference reuse the same job.
 
 Atomic database claims enforce a global maximum of three active jobs across Worker instances. Submission runs through `waitUntil`. Bright Data receives a per-job authenticated callback URL; its completion callback persists the result and starts the next queued work without requiring an open browser. `GET /api/jobs/:id` returns durable status and also runs recovery checks. The browser polls local job status every 2.5 seconds, with an 8-second reconnect delay after network errors. IDs are random read capabilities; there is no public job-list endpoint.
 
@@ -60,3 +60,9 @@ The integration uses the same actor and `profileUrls` input as the synchronous e
 Apify cache keys include provider, actor and API-key scope. History and Retry preserve Apify selection after refresh. Missing photos, mismatched profiles, invalid credentials, depleted credits, failed/aborted/timed-out runs, and malformed responses have clear errors. POST timeouts are not automatically retried because a run may already have been created. The 300-profile input limit and optional permitted image storage also apply to Apify.
 
 References: [actor](https://apify.com/true-data/linkedin-profile-scraper), [asynchronous runs](https://docs.apify.com/api/v2/actors-runs-post), [webhooks](https://docs.apify.com/integrations/webhooks/ad-hoc-webhooks).
+
+## API.sh
+
+Select **API.sh** (`provider: "apish"`) to use `GET https://api.api.sh/linkedin/v1/profile?url=...`. Configure `APISH_API_KEY` locally and as a hosted secret. The server sends this key only to `api.api.sh` in `x-api-key`; it is never sent to Apify or the browser. API.sh is a separate provider from Apify.
+
+The adapter validates the returned `url` against the input and reads the top-level `name` and `image`. Only these normalized profile fields are persisted; other response data is discarded. It shares the 300-profile queue, controlled concurrency, optional photo storage, and provider-specific history/retries. Cache keys are scoped to API.sh and the configured key. Requests have an eight-second budget and retry transient failures; validation and account errors are shown without automatic retries. API response wait is recorded as submission time; the provider does not expose separate internal scraping time.

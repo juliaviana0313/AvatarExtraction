@@ -1,8 +1,9 @@
+import {parseApishProfile,resolveApish} from './apish';
 import {APIFY_ACTOR,apifyId,apifyRequest,parseApifyProfile} from './apify';
 import {type LookupProvider,parseIdentityProfile,resolveIdentity,isResolverPhoto} from './identity-resolver';
 import {normalizeProfile,parseBrightProfile,isAvatar} from './avatar';
 import {MAX_ACTIVE,MAX_BATCH,JOB_TIMEOUT,OUTPUT_FIELDS,isTerminal,retryableStatus,backoff,imageType,boundedMap} from './job-policy';
-interface Env {DB?:D1Database;BUCKET?:R2Bucket;BRIGHTDATA_API_KEY?:string;APIFY_API_KEY?:string}
+interface Env {DB?:D1Database;BUCKET?:R2Bucket;BRIGHTDATA_API_KEY?:string;APIFY_API_KEY?:string;APISH_API_KEY?:string}
 type Ctx={waitUntil(promise:Promise<unknown>):void};
 type Row={provider:LookupProvider;id:string;cache_key:string;active_key:string|null;profile_url:string;origin:string;status:string;storage_allowed:number;snapshot:string|null;result:string|null;error:string|null;created_at:number;submitted_at:number|null;ready_at:number|null;completed_at:number|null;next_check:number;lease_until:number;attempts:number;submission_ms:number|null;scraping_ms:number|null;retrieval_ms:number|null;storage_ms:number|null;image_load_ms:number|null;cache_hit:number};
 const base='https://api.brightdata.com/datasets/v3';
@@ -11,9 +12,10 @@ const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache
 const db=(env:Env)=>{if(!env.DB)throw new Error('Job database unavailable.');return env.DB;};
 const key=(env:Env)=>env.BRIGHTDATA_API_KEY||process.env.BRIGHTDATA_API_KEY||'';
 const apifyKey=(env:Env)=>env.APIFY_API_KEY||process.env.APIFY_API_KEY||'';
+const apishKey=(env:Env)=>env.APISH_API_KEY||process.env.APISH_API_KEY||'';
 const enc=new TextEncoder();
 const hex=(data:ArrayBuffer)=>Array.from(new Uint8Array(data),b=>b.toString(16).padStart(2,'0')).join('');
-async function cacheKey(url:string,env:Env,selected:LookupProvider){return hex(await crypto.subtle.digest('SHA-256',enc.encode((selected==='brightdata'?key(env):selected==='apify'?'apify:'+APIFY_ACTOR+':'+apifyKey(env):'identity-resolver:v1')+'\n'+url)));}
+async function cacheKey(url:string,env:Env,selected:LookupProvider){return hex(await crypto.subtle.digest('SHA-256',enc.encode((selected==='brightdata'?key(env):selected==='apish'?'apish:v1:'+apishKey(env):selected==='apify'?'apify:'+APIFY_ACTOR+':'+apifyKey(env):'identity-resolver:v1')+'\n'+url)));}
 async function callbackKey(id:string,env:Env,selected:LookupProvider='brightdata'){const k=await crypto.subtle.importKey('raw',enc.encode(selected==='apify'?apifyKey(env):key(env)),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',k,enc.encode('avatar-callback:'+id)));}
 async function row(id:string,env:Env){return db(env).prepare('SELECT * FROM avatar_jobs WHERE id=?').bind(id).first<Row>();}
 function view(r:Row){return {id:r.id,provider:r.provider,profileUrl:r.profile_url,status:isTerminal(r.status)?r.status:'pending',phase:r.status,error:r.error,result:r.result?JSON.parse(r.result):null,cacheHit:!!r.cache_hit,timings:{queueMs:r.submitted_at?r.submitted_at-r.created_at:null,submissionMs:r.submission_ms,scrapingMs:r.scraping_ms,retrievalMs:r.retrieval_ms,storageMs:r.storage_ms,imageLoadMs:r.image_load_ms,totalMs:r.completed_at?r.completed_at-r.created_at:null}};}
@@ -59,7 +61,7 @@ async function storePhoto(r:Row,source:string,env:Env):Promise<string>{
 }
 async function finish(r:Row,data:unknown,env:Env,retrievalStarted:number){
   try{
-    const photo=r.cache_hit&&r.result?JSON.parse(r.result):r.provider==='identity-resolver'?parseIdentityProfile(data,r.profile_url):r.provider==='apify'?parseApifyProfile(data,r.profile_url):parseBrightProfile(data,r.profile_url);
+    const photo=r.cache_hit&&r.result?JSON.parse(r.result):r.provider==='identity-resolver'?parseIdentityProfile(data,r.profile_url):r.provider==='apish'?parseApishProfile(data,r.profile_url):r.provider==='apify'?parseApifyProfile(data,r.profile_url):parseBrightProfile(data,r.profile_url);
     const retrievalMs=Date.now()-retrievalStarted;
     photo.avatarUrl=await storePhoto(r,photo.avatarUrl,env);
     let expires=Date.now()+86400000;
@@ -104,8 +106,8 @@ async function submit(r:Row,env:Env){
       await finish(r,[{name:photo.name,url:r.profile_url,avatar:photo.avatarUrl}],env,started);
       return;
     }
-    if(r.provider==='identity-resolver'){
-      const resolved=await resolveIdentity(r.profile_url);
+    if(r.provider==='identity-resolver'||r.provider==='apish'){
+      const resolved=r.provider==='apish'?await resolveApish(r.profile_url,apishKey(env)):await resolveIdentity(r.profile_url);
       await db(env).prepare('UPDATE avatar_jobs SET submitted_at=?,submission_ms=? WHERE id=?').bind(started,resolved.submissionMs,r.id).run();
       r.submission_ms=resolved.submissionMs;
       await finish(r,resolved.data,env,resolved.retrievalStarted);
@@ -181,14 +183,14 @@ export async function handleAvatarJobs(request:Request,env:Env,ctx:Ctx):Promise<
     if(path==='/api/jobs'&&request.method==='POST'){
       const input=await body(request);const urls=input.urls??[input.url];if(!Array.isArray(urls)||!urls.length||urls.length>MAX_BATCH)return json({error:'Enter 1–300 LinkedIn profile URLs.'},400);
       const selected=input.provider??'brightdata';
-      if(!['brightdata','identity-resolver','apify'].includes(selected))return json({error:'Choose Bright Data, Identity Resolver, or Apify.'},400);
+      if(!['brightdata','identity-resolver','apify','apish'].includes(selected))return json({error:'Choose Bright Data, Identity Resolver, Apify, or API.sh.'},400);
       const normalized=[...new Set(urls.map(normalizeProfile))];
       const items=await boundedMap(normalized,3,u=>create(u,input.storeImages===true,url.origin,env,selected));kick(ctx,env);return json({jobs:items},items.some(j=>j.status==='pending')?202:200);
     }
     const match=path.match(/^\/api\/jobs\/([a-f0-9]{32})(?:\/(callback|metrics))?$/);if(!match)return json({error:'Not found.'},404);
     const r=await row(match[1],env);if(!r)return json({error:'Job not found.'},404);
     if(match[2]==='callback'&&request.method==='POST'){
-      if(r.provider==='identity-resolver')return json({error:'Not found.'},404);
+      if(r.provider==='identity-resolver'||r.provider==='apish')return json({error:'Not found.'},404);
       if(request.headers.get('authorization')!==`Bearer ${await callbackKey(r.id,env,r.provider)}`)return json({error:'Unauthorized.'},401);
       if(isTerminal(r.status))return json({ok:true});
       const payload=await body(request);

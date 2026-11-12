@@ -1,7 +1,7 @@
 import {normalizeProfile,isAvatar} from './avatar';
 import {backoff,retryableStatus} from './job-policy';
-export type LookupProvider='brightdata'|'identity-resolver'|'apify';
-export const providerLabel=(provider:LookupProvider)=>provider==='apify'?'Apify':provider==='identity-resolver'?'Identity Resolver':'Bright Data';
+export type LookupProvider='brightdata'|'identity-resolver'|'apify'|'apish';
+export const providerLabel=(provider:LookupProvider)=>provider==='apish'?'API.sh':provider==='apify'?'Apify':provider==='identity-resolver'?'Identity Resolver':'Bright Data';
 export function isResolverPhoto(value:string):boolean {
   try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&((u.hostname==='ai.mihajlo.mk'&&u.pathname.startsWith('/storage/identity-resolver/linkedin/'))||isAvatar(value));}catch{return false;}
 }

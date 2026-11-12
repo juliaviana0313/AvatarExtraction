@@ -146,3 +146,32 @@ test('Apify credentials and submission failures never fall back to another provi
   const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apify'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/Apify/);assert.equal(calls,1);
  }
 });
+
+test('API.sh uses x-api-key GET, parses image, caches independently and stores permitted photos',async()=>{
+ const f=fixture();f.env.APISH_API_KEY='apish-test';delete f.env.BRIGHTDATA_API_KEY;
+ const url='https://www.linkedin.com/in/example/';let apiCalls=0;
+ globalThis.fetch=async(u,options)=>{
+  if(u===photo)return new Response(new Uint8Array([255,216,255,0]));
+  const target=new URL(u);assert.equal(target.origin,'https://api.api.sh');assert.equal(target.pathname,'/linkedin/v1/profile');assert.equal(target.searchParams.get('url'),url);assert.equal(options.method,'GET');assert.equal(options.headers['x-api-key'],'apish-test');assert.equal(options.headers.Authorization,undefined);apiCalls++;
+  return Response.json({name:'Example',url:url.replace(/\/$/,''),image:photo,description:'must not persist'});
+ };
+ const created=await f.call('/api/jobs',{urls:[url],provider:'apish',storeImages:true});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.provider,'apish');assert.equal(done.status,'successful');assert.match(done.result.avatarUrl,/^\/api\/images\//);assert.deepEqual(Object.keys(done.result).sort(),['avatarUrl','name','profileUrl']);
+ const cached=await f.call('/api/jobs',{urls:[url],provider:'apish'});await f.settle();assert.equal(cached.data.jobs[0].cacheHit,true);assert.equal(apiCalls,1);
+ const other=await f.call('/api/jobs',{urls:[url],provider:'apify'});await f.settle();assert.equal(other.data.jobs[0].cacheHit,false);assert.equal(apiCalls,1);
+ assert.equal((await f.call('/api/jobs/'+done.id+'/callback',{status:'ready'})).status,404);
+});
+test('API.sh rejects mismatches and missing photos, and surfaces account errors',async()=>{
+ for(const payload of [{url:'https://linkedin.com/in/other/',image:photo},{url:'https://linkedin.com/in/example/',image:null},{url:'https://linkedin.com/in/example/',image:'http://127.0.0.1/private'},{error:'failed'}]){
+  const f=fixture();f.env.APISH_API_KEY='apish-test';globalThis.fetch=async()=>Response.json(payload);
+  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apish'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/API.sh/);
+ }
+ for(const status of [401,402,422]){
+  const f=fixture();f.env.APISH_API_KEY='apish-test';let calls=0;globalThis.fetch=async()=>{calls++;return new Response('',{status});};
+  const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apish'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'failed');assert.match(done.error,/API.sh/);assert.equal(calls,1);
+ }
+});
+test('API.sh transient errors retry only its own endpoint',async()=>{
+ const f=fixture();f.env.APISH_API_KEY='apish-test';let calls=0;
+ globalThis.fetch=async u=>{assert.equal(new URL(u).hostname,'api.api.sh');return ++calls===1?new Response('',{status:503}):Response.json({name:'Example',url:'https://linkedin.com/in/example/',image:photo});};
+ const created=await f.call('/api/jobs',{urls:['https://linkedin.com/in/example/'],provider:'apish'});await f.settle();const done=(await f.call('/api/jobs/'+created.data.jobs[0].id)).data;await f.settle();assert.equal(done.status,'successful');assert.equal(calls,2);
+});
