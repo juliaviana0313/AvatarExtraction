@@ -125,7 +125,7 @@ export async function pollBrightLookup(token: unknown, key: string, fetcher: typ
 
 // Cache only the minimal public photo result, never the full provider record.
 export type AvatarResult = {name:string;avatarUrl:string;profileUrl:string};
-type CachedLookup = {data:AvatarResult | {status:string;job:unknown};expires:number;checked:number};
+export type CachedLookup = {data:AvatarResult | {status:string;job:unknown};expires:number;checked:number};
 export interface AvatarCache { get(key:string):Promise<CachedLookup|undefined>; put(key:string,value:CachedLookup):Promise<void>; delete(key:string):Promise<void> }
 const memory = new Map<string,CachedLookup>();
 const inFlight = new Map<string,Promise<CachedLookup['data']>>();
@@ -159,7 +159,7 @@ export async function fastAvatarLookup(body:{url?:unknown;job?:unknown},key:stri
   const work=(async()=>{
     try {
       const data=body.job ? await pollBrightLookup(body.job,key,fetcher) : await beginBrightLookup(profileUrl,key,fetcher);
-      let ttl='avatarUrl' in data ? 3600000 : 600000;
+      let ttl='avatarUrl' in data ? 86400000 : 600000;
       if('avatarUrl' in data) {
         const signedExpiry=Number(new URL(data.avatarUrl).searchParams.get('e'))*1000;
         if(signedExpiry>0) ttl=Math.max(0,Math.min(ttl,signedExpiry-Date.now()-60000));

@@ -27,7 +27,7 @@ The browser calls `/api/avatar` with `{url}` once, then polls with the returned 
 
 ## Limits
 
-Provider coverage and public photo availability vary. Default placeholder avatars are rejected. Inactive accounts, invalid keys, depleted credits, rate limits, failed jobs, and missing photos return distinct errors. Only avatar, name, and profile URL are sent to the browser; other provider profile fields are discarded. Recent results remain in browser memory and clear on refresh.
+Provider coverage and public photo availability vary. Default placeholder avatars are rejected. Inactive accounts, invalid keys, depleted credits, rate limits, failed jobs, and missing photos return distinct errors. Only avatar, name, and profile URL are sent to the browser; other provider profile fields are discarded. History is retained in sessionStorage for the current browser tab, including refreshes, with a 24-hour freshness limit. Clear removes that tab’s history.
 
 `lib/avatar.ts` retains the legacy direct-page extraction helper for regression tests; the production API uses Bright Data exclusively.
 
@@ -35,4 +35,8 @@ Source: `app/page.tsx` (dashboard), `app/globals.css` (responsive styles), `app/
 
 ## Lookup performance
 
-Successful results are cached for up to one hour (or less if the image link expires sooner) in a bounded worker memory cache and Cloudflare edge cache. In-progress lookups are reused for ten minutes, avoiding a new Bright Data job on repeated submissions. Concurrent requests in the same worker share work. Edge cache is regional and may be evicted; it is not durable global storage. Failures are not cached. First-time requests still depend on Bright Data processing time. The browser polls every second for the first minute, then every three seconds.
+Bright Data is the bottleneck for unseen profiles: polling requests are fast, but the collection job can exceed a minute. A synchronous endpoint benchmark also exceeded its 60-second limit, so production keeps the resumable asynchronous workflow.
+
+Successful photo results are cached for up to 24 hours, shortened by the image URL expiry. Cloudflare D1 provides a shared persistent cache across regions and deployments; edge and bounded memory caches remain the first tier. No full provider profile records are stored. Expired database rows are removed on writes. The browser can reuse a valid result from its tab's session history without a server request. Broken images invalidate the corresponding browser entry.
+
+In-progress jobs are reused by the edge cache for ten minutes. Concurrent requests in the same worker share work. Pending-job reuse is regional, not globally atomic. First-time lookups still depend on Bright Data. Browser polling remains every second for the first minute and every three seconds thereafter.
